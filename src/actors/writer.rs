@@ -13,7 +13,11 @@ pub struct WriterActor {
 }
 
 impl WriterActor {
-    pub fn new(db_path: &str, batch_size: usize, flush_interval_ms: u64) -> Result<Self, rusqlite::Error> {
+    pub fn new(
+        db_path: &str,
+        batch_size: usize,
+        flush_interval_ms: u64,
+    ) -> Result<Self, rusqlite::Error> {
         let conn = db::init(db_path)?;
         Ok(Self {
             conn,
@@ -29,20 +33,17 @@ impl WriterActor {
         loop {
             tokio::select! {
                 msg = rx.recv() => {
-                    match msg {
-                        Some(event) => {
-                            self.buffer.push(event);
-                            if self.buffer.len() >= self.batch_size {
-                                self.flush();
-                            }
+                    if let Some(event) = msg {
+                        self.buffer.push(event);
+                        if self.buffer.len() >= self.batch_size {
+                            self.flush();
                         }
-                        None => {
-                            // Channel closed — flush remaining and exit.
-                            if !self.buffer.is_empty() {
-                                self.flush();
-                            }
-                            break;
+                    } else {
+                        // Channel closed — flush remaining and exit.
+                        if !self.buffer.is_empty() {
+                            self.flush();
                         }
+                        break;
                     }
                 }
                 _ = interval.tick() => {
@@ -55,17 +56,17 @@ impl WriterActor {
     }
 
     fn flush(&mut self) {
-        let events: Vec<DbEvent> = self.buffer.drain(..).collect();
-        if let Err(e) = self.write_batch(&events) {
-            tracing::error!(error = %e, count = events.len(), "failed to write batch");
+        if let Err(e) = self.write_batch() {
+            tracing::error!(error = %e, count = self.buffer.len(), "failed to write batch");
         } else {
-            tracing::debug!(count = events.len(), "flushed batch");
+            tracing::debug!(count = self.buffer.len(), "flushed batch");
         }
+        self.buffer.clear();
     }
 
-    fn write_batch(&mut self, events: &[DbEvent]) -> Result<(), rusqlite::Error> {
+    fn write_batch(&mut self) -> Result<(), rusqlite::Error> {
         let tx = self.conn.transaction()?;
-        for event in events {
+        for event in &self.buffer {
             match event {
                 DbEvent::SpotPrice(sp) => {
                     db::queries::insert_spot_price(&tx, sp)?;
@@ -73,8 +74,17 @@ impl WriterActor {
                 DbEvent::Market(ms) => {
                     db::queries::insert_market(&tx, ms)?;
                 }
-                DbEvent::BookSnapshot { market_id, best_bid, best_ask, midpoint, spread, ts } => {
-                    db::queries::insert_book_snapshot(&tx, market_id, *best_bid, *best_ask, *midpoint, *spread, *ts)?;
+                DbEvent::BookSnapshot {
+                    market_id,
+                    best_bid,
+                    best_ask,
+                    midpoint,
+                    spread,
+                    ts,
+                } => {
+                    db::queries::insert_book_snapshot(
+                        &tx, market_id, *best_bid, *best_ask, *midpoint, *spread, *ts,
+                    )?;
                 }
                 DbEvent::Signal(sig) => {
                     db::queries::insert_signal(&tx, sig)?;
@@ -87,6 +97,12 @@ impl WriterActor {
                 }
                 DbEvent::Trade(tr) => {
                     db::queries::insert_trade(&tx, tr)?;
+                }
+                DbEvent::MarketResolution {
+                    market_id,
+                    resolved_side,
+                } => {
+                    db::queries::update_market_resolution(&tx, market_id, resolved_side)?;
                 }
                 DbEvent::ConfigSnapshot { config_json, ts } => {
                     db::queries::insert_config_snapshot(&tx, config_json, *ts)?;

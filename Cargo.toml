@@ -1,6 +1,6 @@
 [package]
 name = "polymarket-bot"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -14,9 +14,55 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12", features = ["json"] }
-url = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Polymarket API client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Polymarket API authentication (HMAC-SHA256)
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+
+# EIP-712 order signing (real trading)
+k256 = { version = "0.13", features = ["ecdsa"] }
+tiny-keccak = { version = "2", features = ["keccak"] }
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
 approx = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+doc_markdown = "allow"
+upper_case_acronyms = "allow"
+wildcard_imports = "allow"
+too_many_lines = "allow"
+struct_field_names = "allow"

@@ -1,39 +1,106 @@
+# ============================================================================
+# Polymarket Paper-Trading Bot Configuration
+# ============================================================================
+
 [general]
+# Running mode: "paper" (simulated fills) or "live" (real orders, not yet implemented)
 mode = "paper"
+# Tracing verbosity: "trace", "debug", "info", "warn", "error"
 log_level = "info"
+# Path to the SQLite database file (created automatically)
 db_path = "data/bot.db"
+# Auto-prune spot_prices and book_snapshots older than this many days
 db_retention_days = 7
 
 [bankroll]
-initial = 100000.0
+# Starting virtual bankroll in USD for paper trading
+initial = 100.0
 
 [strategy]
-tau_min = 0.05
+# Minimum absolute edge required before the LMSR spread check (entry gate threshold).
+# A higher value means fewer but higher-conviction trades.
+# edge must exceed tau_min + effective_spread to pass the entry gate.
+# Set low (0.02) for paper trading to see more activity; increase for live.
+tau_min = 0.02
+
+# Fraction of full Kelly criterion to use for position sizing.
+# 0.5 = half-Kelly (recommended to reduce variance vs full Kelly).
+# Range: 0.0–1.0. Lower = more conservative.
 kelly_fraction = 0.5
+
+# Maximum order size as a fraction of 24h market volume (stealth cap).
+# Prevents the bot from moving the market. 0.02 = 2% of daily volume.
 max_volume_pct = 0.02
-min_confidence = 0.60
+
+# Minimum Bayesian confidence (distance from 0.5, scaled 0–1) required to trade.
+# Filters out signals where the model is unsure.
+# 0.20 = need p_hat ≥ 0.60 or ≤ 0.40 (paper trading, more active).
+# 0.60 = need p_hat ≥ 0.80 or ≤ 0.20 (conservative, fewer trades).
+min_confidence = 0.20
+
+# LMSR liquidity parameter (b). Controls price sensitivity to quantity changes.
+# Higher b = more liquidity = tighter spread = smaller price impact per trade.
+# Polymarket typically uses b in the 50k–200k range for crypto markets.
 liquidity_b = 100000.0
 
 [strategy.decay]
+# Exponential decay rates (lambda) for each signal source.
+# weight = exp(-lambda * age_in_seconds)
+# half_life ≈ ln(2) / lambda
+
+# Spot price decay: lambda = 0.00230 → half-life ≈ 5 minutes.
+# Recent price moves matter most; stale ticks decay quickly.
 spot_lambda = 0.00230
+
+# News signal decay: lambda = 0.00019 → half-life ≈ 1 hour.
+# News stays relevant longer than raw price action.
 news_lambda = 0.00019
+
+# Social sentiment decay: lambda = 0.00039 → half-life ≈ 30 minutes.
+# Twitter/social signals fade faster than news but slower than spot.
 social_lambda = 0.00039
+
+# On-chain signal decay: lambda = 0.000096 → half-life ≈ 2 hours.
+# Blockchain data (whale moves, exchange flows) is slow-moving and persistent.
 onchain_lambda = 0.000096
 
 [markets]
+# Which prediction markets to track. Format: "{ASSET}_{WINDOW}"
+# ASSET: BTC, ETH
+# WINDOW: 5m (5-minute resolution), 15m (15-minute resolution)
 enabled = ["BTC_5m", "BTC_15m", "ETH_5m", "ETH_15m"]
 
 [binance]
+# Binance WebSocket base URL for real-time trade streams
 ws_url = "wss://stream.binance.com:9443/ws"
+# Trade streams to subscribe to (one per asset).
+# Format: "{symbol_lowercase}@trade" — delivers every individual trade.
 streams = ["btcusdt@trade", "ethusdt@trade"]
 
 [polymarket]
+# Polymarket CLOB (Central Limit Order Book) REST API base URL.
+# Used for placing/cancelling orders and fetching order book snapshots.
 clob_url = "https://clob.polymarket.com"
+
+# Polymarket WebSocket URL for real-time order book updates.
 ws_url = "wss://ws-subscriptions-clob.polymarket.com"
+
+# Gamma API base URL — serves market metadata (condition IDs, tokens, resolution times).
 gamma_url = "https://gamma-api.polymarket.com"
+
+# How often (seconds) to poll Gamma API for new/updated markets.
 poll_interval_secs = 30
+
+# How often (seconds) to refresh the fee schedule from Polymarket.
+# Polymarket introduced dynamic taker fees in Jan 2026, varying by probability bucket
+# and market window (e.g., ~3.15% at 50/50 odds on 15m markets).
 fee_refresh_secs = 60
 
 [writer]
+# SQLite writer batching: accumulate this many events before flushing to disk.
+# Higher = fewer disk writes but more data at risk if the process crashes.
 batch_size = 100
+
+# Maximum time (milliseconds) between flushes, even if batch_size isn't reached.
+# Ensures data lands on disk promptly during low-activity periods.
 flush_interval_ms = 500

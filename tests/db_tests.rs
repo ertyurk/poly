@@ -1,6 +1,6 @@
-use tempfile::NamedTempFile;
 use polymarket_bot::db;
 use polymarket_bot::types::*;
+use tempfile::NamedTempFile;
 
 #[test]
 fn test_init_creates_tables() {
@@ -30,9 +30,15 @@ fn test_wal_mode_enabled() {
 fn test_insert_spot_price() {
     let tmp = NamedTempFile::new().unwrap();
     let conn = db::init(tmp.path().to_str().unwrap()).unwrap();
-    let sp = SpotPrice { asset: Asset::BTC, price: 85000.0, ts: 1000000 };
+    let sp = SpotPrice {
+        asset: Asset::BTC,
+        price: 85000.0,
+        ts: 1000000,
+    };
     db::queries::insert_spot_price(&conn, &sp).unwrap();
-    let count: i32 = conn.query_row("SELECT COUNT(*) FROM spot_prices", [], |r| r.get(0)).unwrap();
+    let count: i32 = conn
+        .query_row("SELECT COUNT(*) FROM spot_prices", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -86,6 +92,8 @@ fn test_insert_decision_and_trade() {
     };
     db::queries::insert_trade(&conn, &tr).unwrap();
 
-    let count: i32 = conn.query_row("SELECT COUNT(*) FROM trades", [], |r| r.get(0)).unwrap();
+    let count: i32 = conn
+        .query_row("SELECT COUNT(*) FROM trades", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(count, 1);
 }

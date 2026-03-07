@@ -1,12 +1,17 @@
 use crate::math::{kelly, lmsr};
 use crate::types::*;
 
+/// Fallback fee rate (highest tier: 50/50 odds on 15m markets).
+const FALLBACK_FEE_RATE: f64 = 0.0315;
+
 /// Compute raw edge: p_hat - p_market.
+#[inline]
 pub fn compute_edge(p_hat: f64, p_market: f64) -> f64 {
     p_hat - p_market
 }
 
 /// Effective edge after fees: |edge| - fee_rate.
+#[inline]
 pub fn effective_edge(edge_abs: f64, fee_rate: f64) -> f64 {
     edge_abs - fee_rate
 }
@@ -14,18 +19,47 @@ pub fn effective_edge(edge_abs: f64, fee_rate: f64) -> f64 {
 /// Hardcoded fee schedule for 15-minute resolution markets (Polymarket approximation).
 pub fn default_fee_schedule_15m() -> Vec<FeeScheduleEntry> {
     vec![
-        FeeScheduleEntry { prob_low: 0.00, prob_high: 0.10, fee_bps: 100.0 },
-        FeeScheduleEntry { prob_low: 0.10, prob_high: 0.20, fee_bps: 150.0 },
-        FeeScheduleEntry { prob_low: 0.20, prob_high: 0.35, fee_bps: 200.0 },
-        FeeScheduleEntry { prob_low: 0.35, prob_high: 0.65, fee_bps: 315.0 },
-        FeeScheduleEntry { prob_low: 0.65, prob_high: 0.80, fee_bps: 200.0 },
-        FeeScheduleEntry { prob_low: 0.80, prob_high: 0.90, fee_bps: 150.0 },
-        FeeScheduleEntry { prob_low: 0.90, prob_high: 1.00, fee_bps: 100.0 },
+        FeeScheduleEntry {
+            prob_low: 0.00,
+            prob_high: 0.10,
+            fee_bps: 100.0,
+        },
+        FeeScheduleEntry {
+            prob_low: 0.10,
+            prob_high: 0.20,
+            fee_bps: 150.0,
+        },
+        FeeScheduleEntry {
+            prob_low: 0.20,
+            prob_high: 0.35,
+            fee_bps: 200.0,
+        },
+        FeeScheduleEntry {
+            prob_low: 0.35,
+            prob_high: 0.65,
+            fee_bps: 315.0,
+        },
+        FeeScheduleEntry {
+            prob_low: 0.65,
+            prob_high: 0.80,
+            fee_bps: 200.0,
+        },
+        FeeScheduleEntry {
+            prob_low: 0.80,
+            prob_high: 0.90,
+            fee_bps: 150.0,
+        },
+        FeeScheduleEntry {
+            prob_low: 0.90,
+            prob_high: 1.00,
+            fee_bps: 100.0,
+        },
     ]
 }
 
 /// Look up fee rate (as a fraction, e.g. 0.0315) for a given probability and window.
 /// Falls back to the 0.35-0.65 bucket (highest fee) if no match is found.
+#[inline]
 pub fn lookup_fee(p_market: f64, _window: Window, schedule: &[FeeScheduleEntry]) -> f64 {
     for entry in schedule {
         if p_market >= entry.prob_low && p_market < entry.prob_high {
@@ -38,17 +72,18 @@ pub fn lookup_fee(p_market: f64, _window: Window, schedule: &[FeeScheduleEntry])
             return last.fee_bps / 10_000.0;
         }
     }
-    // Fallback: highest fee tier
-    0.0315
+    FALLBACK_FEE_RATE
 }
 
 /// Entry gate: edge must exceed tau_min + effective_spread.
+#[inline]
 pub fn check_entry_gate(edge_abs: f64, tau_min: f64, p: f64, b: f64, delta_min: f64) -> bool {
     let spread = lmsr::effective_spread(p, b, delta_min);
     edge_abs > tau_min + spread
 }
 
 /// Cap order size to a fraction of 24h volume to reduce market impact.
+#[inline]
 pub fn apply_stealth_cap(size: f64, volume_24h: f64, max_pct: f64) -> f64 {
     size.min(volume_24h * max_pct)
 }
@@ -152,6 +187,7 @@ use tokio::sync::mpsc;
 pub enum DecisionInput {
     Signal(Signal),
     Market(MarketState),
+    #[allow(dead_code)]
     Fee(FeeUpdate),
 }
 
@@ -168,7 +204,7 @@ pub struct DecisionActor {
     /// Cached latest market state per market_id.
     markets: std::collections::HashMap<String, MarketState>,
     /// Cached fee schedule per window.
-    fee_schedules: std::collections::HashMap<String, Vec<FeeScheduleEntry>>,
+    fee_schedules: std::collections::HashMap<Window, Vec<FeeScheduleEntry>>,
     /// Configuration
     tau_min: f64,
     b: f64,
@@ -179,6 +215,7 @@ pub struct DecisionActor {
 }
 
 impl DecisionActor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         rx: mpsc::Receiver<DecisionInput>,
         tx: mpsc::Sender<DecisionOutput>,
@@ -190,7 +227,7 @@ impl DecisionActor {
         min_confidence: f64,
     ) -> Self {
         let mut fee_schedules = std::collections::HashMap::new();
-        fee_schedules.insert("15m".to_string(), default_fee_schedule_15m());
+        fee_schedules.insert(Window::FifteenMin, default_fee_schedule_15m());
         Self {
             rx,
             tx,
@@ -212,18 +249,16 @@ impl DecisionActor {
                     self.markets.insert(ms.market_id.clone(), ms);
                 }
                 DecisionInput::Fee(fu) => {
-                    self.fee_schedules
-                        .insert(fu.window.as_str().to_string(), fu.schedule);
+                    self.fee_schedules.insert(fu.window, fu.schedule);
                 }
                 DecisionInput::Signal(sig) => {
                     let Some(ms) = self.markets.get(&sig.market_id) else {
                         continue;
                     };
 
-                    let window_key = ms.window.as_str().to_string();
                     let schedule = self
                         .fee_schedules
-                        .get(&window_key)
+                        .get(&ms.window)
                         .cloned()
                         .unwrap_or_else(default_fee_schedule_15m);
 

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -6,11 +8,11 @@ pub enum Asset {
     ETH,
 }
 
-impl Asset {
-    pub fn as_str(&self) -> &'static str {
+impl fmt::Display for Asset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Asset::BTC => "BTC",
-            Asset::ETH => "ETH",
+            Self::BTC => f.write_str("BTC"),
+            Self::ETH => f.write_str("ETH"),
         }
     }
 }
@@ -22,11 +24,18 @@ pub enum Window {
 }
 
 impl Window {
-    pub fn as_str(&self) -> &'static str {
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Window::FiveMin => "5m",
-            Window::FifteenMin => "15m",
+            Self::FiveMin => "5m",
+            Self::FifteenMin => "15m",
         }
+    }
+}
+
+impl fmt::Display for Window {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -36,11 +45,11 @@ pub enum Side {
     No,
 }
 
-impl Side {
-    pub fn as_str(&self) -> &'static str {
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Side::Yes => "YES",
-            Side::No => "NO",
+            Self::Yes => f.write_str("YES"),
+            Self::No => f.write_str("NO"),
         }
     }
 }
@@ -51,11 +60,11 @@ pub enum Outcome {
     Loss,
 }
 
-impl Outcome {
-    pub fn as_str(&self) -> &'static str {
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Outcome::Win => "WIN",
-            Outcome::Loss => "LOSS",
+            Self::Win => f.write_str("WIN"),
+            Self::Loss => f.write_str("LOSS"),
         }
     }
 }
@@ -64,19 +73,15 @@ impl Outcome {
 pub enum SkipReason {
     InsufficientEdge,
     FeeTooHigh,
-    VolumeCapHit,
     LowConfidence,
-    BankrollDepleted,
 }
 
-impl SkipReason {
-    pub fn as_str(&self) -> &'static str {
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SkipReason::InsufficientEdge => "INSUFFICIENT_EDGE",
-            SkipReason::FeeTooHigh => "FEE_TOO_HIGH",
-            SkipReason::VolumeCapHit => "VOLUME_CAP_HIT",
-            SkipReason::LowConfidence => "LOW_CONFIDENCE",
-            SkipReason::BankrollDepleted => "BANKROLL_DEPLETED",
+            Self::InsufficientEdge => f.write_str("INSUFFICIENT_EDGE"),
+            Self::FeeTooHigh => f.write_str("FEE_TOO_HIGH"),
+            Self::LowConfidence => f.write_str("LOW_CONFIDENCE"),
         }
     }
 }
@@ -84,13 +89,17 @@ impl SkipReason {
 // Timestamps are unix microseconds (i64)
 pub type TsMicros = i64;
 
+/// Milliseconds-to-microseconds conversion factor.
+pub const MS_TO_MICROS: i64 = 1000;
+
+#[inline]
 pub fn now_micros() -> TsMicros {
     chrono::Utc::now().timestamp_micros()
 }
 
 // --- Messages passed between actors ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct SpotPrice {
     pub asset: Asset,
     pub price: f64,
@@ -104,7 +113,9 @@ pub struct MarketState {
     pub window: Window,
     pub token_yes: String,
     pub token_no: String,
+    #[allow(dead_code)]
     pub best_bid: f64,
+    #[allow(dead_code)]
     pub best_ask: f64,
     pub midpoint: f64,
     pub resolution_ts: TsMicros,
@@ -174,6 +185,14 @@ pub struct TradeResult {
     pub resolved_ts: TsMicros,
 }
 
+/// Command to settle a resolved market.
+#[derive(Debug, Clone)]
+pub struct SettleCommand {
+    pub market_id: String,
+    pub resolved_side: Side,
+    pub resolved_ts: TsMicros,
+}
+
 // --- Unified event for SQLite Writer ---
 
 #[derive(Debug, Clone)]
@@ -192,6 +211,10 @@ pub enum DbEvent {
     Decision(TradeDecision),
     Skip(NoTrade),
     Trade(TradeResult),
+    MarketResolution {
+        market_id: String,
+        resolved_side: String,
+    },
     ConfigSnapshot {
         config_json: String,
         ts: TsMicros,

@@ -8,6 +8,7 @@ pub fn init(path: &str) -> Result<Connection, rusqlite::Error> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     schema::create_tables(&conn)?;
     Ok(conn)
 }

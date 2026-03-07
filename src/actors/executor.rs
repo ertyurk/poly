@@ -1,4 +1,8 @@
+use crate::polymarket::PolymarketClient;
 use crate::types::*;
+
+/// Maximum price slippage tolerance (fraction) before rejecting a fill.
+const MAX_SLIPPAGE: f64 = 0.10;
 
 #[derive(Debug, Clone)]
 struct OpenPosition {
@@ -11,39 +15,78 @@ struct OpenPosition {
     entry_ts: TsMicros,
 }
 
-pub struct PaperExecutor {
+/// Determines whether the executor places real orders or simulates fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Paper,
+    Live,
+}
+
+pub struct Executor {
+    mode: Mode,
     bankroll: f64,
     positions: Vec<OpenPosition>,
     next_decision_id: i64,
+    client: Option<PolymarketClient>,
+    /// Maps market_id → (token_yes, token_no)
+    market_tokens: std::collections::HashMap<String, (String, String)>,
 }
 
-impl PaperExecutor {
-    pub fn new(initial_bankroll: f64) -> Self {
+impl Executor {
+    /// Create an executor.
+    ///
+    /// In `Paper` mode, `client` can be `None` — fills are simulated locally.
+    /// In `Live` mode, `client` must be `Some` with authenticated credentials.
+    pub fn new(mode: Mode, initial_bankroll: f64, client: Option<PolymarketClient>) -> Self {
         Self {
+            mode,
             bankroll: initial_bankroll,
             positions: Vec::new(),
             next_decision_id: 1,
+            client,
+            market_tokens: std::collections::HashMap::new(),
         }
     }
 
-    pub fn bankroll(&self) -> f64 {
+    #[allow(dead_code)]
+    pub const fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub const fn bankroll(&self) -> f64 {
         self.bankroll
     }
 
-    pub fn position_count(&self) -> usize {
-        self.positions.len()
+    /// Register token IDs for a market so the executor knows which token to trade.
+    pub fn register_market(&mut self, market_id: &str, token_yes: &str, token_no: &str) {
+        self.market_tokens.insert(
+            market_id.to_string(),
+            (token_yes.to_string(), token_no.to_string()),
+        );
     }
 
-    /// Try to fill a trade decision against the current order book.
-    /// Returns the simulated decision_id if filled.
-    pub fn try_fill(&mut self, dec: &TradeDecision, best_ask: f64, best_bid: f64) -> Option<i64> {
+    /// Try to fill a trade decision.
+    ///
+    /// In `Paper` mode: simulates the fill at market prices.
+    /// In `Live` mode: places an order via Polymarket CLOB API.
+    pub async fn try_fill(
+        &mut self,
+        dec: &TradeDecision,
+        best_ask: f64,
+        best_bid: f64,
+    ) -> Option<i64> {
+        // Only one position per market
+        if self.positions.iter().any(|p| p.market_id == dec.market_id) {
+            return None;
+        }
+
         let fill_price = match dec.side {
             Side::Yes => best_ask,
             Side::No => 1.0 - best_bid,
         };
 
-        // Reject if price slipped more than 10% from expected
-        if (fill_price - dec.price).abs() / dec.price > 0.10 {
+        // Reject if price slipped beyond tolerance
+        if dec.price > 0.0 && (fill_price - dec.price).abs() / dec.price > MAX_SLIPPAGE {
             tracing::debug!(
                 market_id = %dec.market_id,
                 expected = dec.price,
@@ -51,6 +94,63 @@ impl PaperExecutor {
                 "fill rejected: price slipped"
             );
             return None;
+        }
+
+        let token_id = self.token_for_trade(&dec.market_id, dec.side);
+
+        match self.mode {
+            Mode::Paper => {
+                tracing::info!(
+                    market_id = %dec.market_id,
+                    side = %dec.side,
+                    size = dec.size,
+                    price = fill_price,
+                    "paper fill"
+                );
+            }
+            Mode::Live => {
+                if let Some(ref client) = self.client {
+                    if let Some(ref tid) = token_id {
+                        let side_buy = dec.side == Side::Yes;
+                        let fee_bps = (dec.fee_rate * 10_000.0) as u64;
+                        match client
+                            .place_order(tid, side_buy, fill_price, dec.size, fee_bps)
+                            .await
+                        {
+                            Ok(resp) => {
+                                if resp.success.unwrap_or(false) {
+                                    tracing::info!(
+                                        market_id = %dec.market_id,
+                                        order_id = resp.order_id.as_deref().unwrap_or("?"),
+                                        side = %dec.side,
+                                        size = dec.size,
+                                        price = fill_price,
+                                        "live fill"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        market_id = %dec.market_id,
+                                        error = resp.error_msg.as_deref().unwrap_or("unknown"),
+                                        "order rejected"
+                                    );
+                                    return None;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    market_id = %dec.market_id,
+                                    error = %e,
+                                    "order placement failed"
+                                );
+                                return None;
+                            }
+                        }
+                    } else {
+                        tracing::warn!(market_id = %dec.market_id, "no token ID for market");
+                        return None;
+                    }
+                }
+            }
         }
 
         let id = self.next_decision_id;
@@ -66,20 +166,18 @@ impl PaperExecutor {
             entry_ts: dec.ts,
         });
 
-        tracing::info!(
-            market_id = %dec.market_id,
-            side = ?dec.side,
-            size = dec.size,
-            price = fill_price,
-            "paper fill"
-        );
-
         Some(id)
     }
 
-    /// Settle all positions for a resolved market
-    pub fn settle(&mut self, market_id: &str, resolved_side: Side, resolved_ts: TsMicros) -> Vec<TradeResult> {
-        let (to_settle, remaining): (Vec<_>, Vec<_>) = self.positions
+    /// Settle all positions for a resolved market.
+    pub fn settle(
+        &mut self,
+        market_id: &str,
+        resolved_side: Side,
+        resolved_ts: TsMicros,
+    ) -> Vec<TradeResult> {
+        let (to_settle, remaining): (Vec<_>, Vec<_>) = self
+            .positions
             .drain(..)
             .partition(|p| p.market_id == market_id);
 
@@ -115,5 +213,14 @@ impl PaperExecutor {
         }
 
         results
+    }
+
+    fn token_for_trade(&self, market_id: &str, side: Side) -> Option<String> {
+        self.market_tokens
+            .get(market_id)
+            .map(|(yes, no)| match side {
+                Side::Yes => yes.clone(),
+                Side::No => no.clone(),
+            })
     }
 }

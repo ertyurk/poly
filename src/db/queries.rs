@@ -5,25 +5,7 @@ use crate::types::*;
 pub fn insert_spot_price(conn: &Connection, sp: &SpotPrice) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO spot_prices (asset, price, ts) VALUES (?1, ?2, ?3)",
-        params![sp.asset.as_str(), sp.price, sp.ts],
-    )?;
-    Ok(())
-}
-
-pub fn insert_market(conn: &Connection, ms: &MarketState) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "INSERT OR IGNORE INTO markets (market_id, asset, window, token_yes, token_no, open_ts, resolution_ts, open_price)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            ms.market_id,
-            ms.asset.as_str(),
-            ms.window.as_str(),
-            ms.token_yes,
-            ms.token_no,
-            ms.open_ts,
-            ms.resolution_ts,
-            ms.open_price,
-        ],
+        params![sp.asset.to_string(), sp.price, sp.ts],
     )?;
     Ok(())
 }
@@ -36,6 +18,24 @@ pub fn update_market_resolution(
     conn.execute(
         "UPDATE markets SET resolved_side = ?1 WHERE market_id = ?2",
         params![resolved_side, market_id],
+    )?;
+    Ok(())
+}
+
+pub fn insert_market(conn: &Connection, ms: &MarketState) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR IGNORE INTO markets (market_id, asset, window, token_yes, token_no, open_ts, resolution_ts, open_price)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            ms.market_id,
+            ms.asset.to_string(),
+            ms.window.to_string(),
+            ms.token_yes,
+            ms.token_no,
+            ms.open_ts,
+            ms.resolution_ts,
+            ms.open_price,
+        ],
     )?;
     Ok(())
 }
@@ -80,7 +80,7 @@ pub fn insert_decision(conn: &Connection, dec: &TradeDecision) -> Result<i64, ru
         params![
             dec.market_id,
             "TRADE",
-            dec.side.as_str(),
+            dec.side.to_string(),
             dec.size,
             dec.price,
             dec.edge,
@@ -103,7 +103,7 @@ pub fn insert_skip(conn: &Connection, skip: &NoTrade) -> Result<i64, rusqlite::E
             skip.edge,
             skip.effective_edge,
             skip.fee_rate,
-            skip.reason.as_str(),
+            skip.reason.to_string(),
             skip.ts,
         ],
     )?;
@@ -117,11 +117,11 @@ pub fn insert_trade(conn: &Connection, tr: &TradeResult) -> Result<(), rusqlite:
         params![
             tr.decision_id,
             tr.market_id,
-            tr.side.as_str(),
+            tr.side.to_string(),
             tr.entry_price,
             tr.size,
             tr.fee_paid,
-            tr.outcome.as_str(),
+            tr.outcome.to_string(),
             tr.pnl,
             tr.bankroll_after,
             tr.entry_ts,
@@ -141,17 +141,4 @@ pub fn insert_config_snapshot(
         params![json, ts],
     )?;
     Ok(())
-}
-
-pub fn prune_old_data(conn: &Connection, cutoff_ts: TsMicros) -> Result<usize, rusqlite::Error> {
-    let mut total = 0usize;
-    total += conn.execute(
-        "DELETE FROM spot_prices WHERE ts < ?1",
-        params![cutoff_ts],
-    )?;
-    total += conn.execute(
-        "DELETE FROM book_snapshots WHERE ts < ?1",
-        params![cutoff_ts],
-    )?;
-    Ok(total)
 }

@@ -6,6 +6,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::config::Config;
 use crate::types::*;
 
+const MAX_RETRIES: u32 = 5;
+
 #[derive(Debug, serde::Deserialize)]
 struct BinanceTrade {
     #[serde(rename = "s")]
@@ -27,7 +29,7 @@ pub fn parse_binance_trade(msg: &str) -> Option<SpotPrice> {
     Some(SpotPrice {
         asset,
         price,
-        ts: trade.trade_time * 1000,
+        ts: trade.trade_time * MS_TO_MICROS,
     })
 }
 
@@ -36,7 +38,7 @@ pub struct IngestActor {
 }
 
 impl IngestActor {
-    pub fn new(config: Config) -> Self {
+    pub const fn new(config: Config) -> Self {
         Self { config }
     }
 
@@ -68,7 +70,8 @@ impl IngestActor {
                                 match msg {
                                     Some(Ok(Message::Text(text))) => {
                                         if let Some(sp) = parse_binance_trade(&text) {
-                                            let _ = db_tx.try_send(DbEvent::SpotPrice(sp.clone()));
+                                            // SpotPrice is Copy, no clone needed
+                                            let _ = db_tx.try_send(DbEvent::SpotPrice(sp));
                                             let _ = spot_tx.try_send(sp);
                                         }
                                     }
@@ -92,7 +95,7 @@ impl IngestActor {
                 }
                 Err(e) => {
                     retry_count += 1;
-                    if retry_count > 5 {
+                    if retry_count > MAX_RETRIES {
                         tracing::error!("Binance WS: max retries exceeded");
                         return;
                     }

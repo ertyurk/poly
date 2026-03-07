@@ -1,64 +1,107 @@
 mod actors;
+mod cli;
 mod config;
 mod db;
 mod math;
+mod polymarket;
 mod types;
 
 use actors::decision::{DecisionActor, DecisionInput, DecisionOutput};
-use actors::executor::PaperExecutor;
+use actors::executor::{Executor, Mode};
 use actors::ingest::IngestActor;
+use actors::market_fetcher::MarketFetcher;
 use actors::signal::SignalActor;
 use actors::writer::WriterActor;
+use cli::Cli;
+use polymarket::PolymarketClient;
 use types::*;
 
+use clap::Parser;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Initialize tracing
+    // 1. Parse CLI
+    let cli = Cli::parse();
+
+    // 2. Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("polymarket_bot=info".parse()?),
+            EnvFilter::from_default_env().add_directive("polymarket_bot=info".parse()?),
         )
         .init();
 
-    // 2. Load config
-    let config = config::Config::load("config.toml")?;
-    tracing::info!(mode = %config.general.mode, "loaded config");
+    // 3. Load config
+    let config = config::Config::load(&cli.config)?;
 
-    // 3. Create data/ directory if needed
+    // 4. Apply CLI overrides
+    let bankroll = cli.bankroll.unwrap_or(config.bankroll.initial);
+    let paper_trade = cli.paper_trade;
+    let mode_str = if paper_trade { "paper" } else { "real" };
+
+    tracing::info!(mode = mode_str, bankroll = bankroll, "loaded config");
+
+    // 5. Create data/ directory if needed
     std::fs::create_dir_all("data").ok();
 
-    // 4. Shutdown watch channel
+    // 6. Build Polymarket client for order execution (live mode only)
+    let exec_client: Option<PolymarketClient> = if paper_trade {
+        None
+    } else {
+        let api_key = std::env::var("POLYMARKET_API_KEY")
+            .map_err(|_| "POLYMARKET_API_KEY env var required for real trading")?;
+        let api_secret = std::env::var("POLYMARKET_API_SECRET")
+            .map_err(|_| "POLYMARKET_API_SECRET env var required for real trading")?;
+        let passphrase = std::env::var("POLYMARKET_PASSPHRASE")
+            .map_err(|_| "POLYMARKET_PASSPHRASE env var required for real trading")?;
+        let private_key = std::env::var("PRIVATE_KEY")
+            .map_err(|_| "PRIVATE_KEY env var required for real trading")?;
+
+        Some(
+            PolymarketClient::new_authenticated(
+                &config.polymarket.gamma_url,
+                &config.polymarket.clob_url,
+                api_key,
+                api_secret,
+                passphrase,
+                private_key,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e })?,
+        )
+    };
+
+    // 7. Shutdown watch channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // 5. Create all mpsc channels
+    // 8. Create all mpsc channels
 
     // db_tx/db_rx — all actors send to writer
     let (db_tx, db_rx) = mpsc::channel::<DbEvent>(10_000);
 
-    // spot_tx/spot_rx — ingest -> signal
-    let (spot_tx, spot_rx) = mpsc::channel::<SpotPrice>(5_000);
+    // spot_tx — ingest sends here, then we fan out
+    let (spot_tx, mut spot_rx_fanout) = mpsc::channel::<SpotPrice>(5_000);
+    let (spot_tx_signal, spot_rx_signal) = mpsc::channel::<SpotPrice>(5_000);
 
-    // market channels — we need to fan out MarketState to both signal and decision
+    // market channels — market_fetcher → signal and decision
     let (market_tx_signal, market_rx_signal) = mpsc::channel::<MarketState>(100);
     let (market_tx_decision, market_rx_decision) = mpsc::channel::<MarketState>(100);
 
-    // signal_tx/signal_rx — signal -> decision
+    // signal_tx/signal_rx — signal → decision
     let (signal_tx, signal_rx) = mpsc::channel::<Signal>(1_000);
 
-    // fee_tx/fee_rx — for decision engine
-    let (fee_tx, fee_rx) = mpsc::channel::<FeeUpdate>(10);
-
-    // DecisionActor uses a single DecisionInput channel
+    // DecisionActor input/output
     let (decision_in_tx, decision_in_rx) = mpsc::channel::<DecisionInput>(200);
-
-    // DecisionActor emits DecisionOutput
     let (decision_out_tx, mut decision_out_rx) = mpsc::channel::<DecisionOutput>(100);
 
-    // 6. Send config snapshot to db_tx
+    // Settle channel — market_fetcher → executor
+    let (settle_tx, mut settle_rx) = mpsc::channel::<SettleCommand>(100);
+
+    // Market registration channel — market_fetcher → executor
+    let (market_reg_tx, mut market_reg_rx) = mpsc::channel::<MarketState>(100);
+
+    // 9. Send config snapshot to DB
     {
         let config_json = serde_json::to_string(&config)?;
         let _ = db_tx
@@ -69,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     }
 
-    // 7. Spawn all actors
+    // 10. Spawn all actors
 
     // Writer actor
     let mut writer = WriterActor::new(
@@ -81,12 +124,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         writer.run(db_rx).await;
     });
 
-    // Ingest actor
+    // Ingest actor (Binance spot prices)
     let ingest = IngestActor::new(config.clone());
     let ingest_db_tx = db_tx.clone();
     let ingest_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         ingest.run(spot_tx, ingest_db_tx, ingest_shutdown).await;
+    });
+
+    // Spot price fan-out: ingest → signal
+    tokio::spawn(async move {
+        while let Some(sp) = spot_rx_fanout.recv().await {
+            let _ = spot_tx_signal.try_send(sp);
+        }
     });
 
     // Signal actor
@@ -95,11 +145,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signal_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         signal_actor
-            .run(spot_rx, market_rx_signal, signal_tx, signal_db_tx, signal_shutdown)
+            .run(
+                spot_rx_signal,
+                market_rx_signal,
+                signal_tx,
+                signal_db_tx,
+                signal_shutdown,
+            )
             .await;
     });
 
-    // Forwarding tasks: merge signal_rx, market_rx_decision, fee_rx into decision_in_tx
+    // Forwarding: merge signal_rx and market_rx_decision into decision_in_tx
     {
         let tx = decision_in_tx.clone();
         tokio::spawn(async move {
@@ -116,24 +172,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             let mut market_rx = market_rx_decision;
             while let Some(ms) = market_rx.recv().await {
+                // Also send to registration channel for executor
+                let _ = market_reg_tx.send(ms.clone()).await;
                 if tx.send(DecisionInput::Market(ms)).await.is_err() {
                     break;
                 }
             }
         });
     }
-    {
-        let tx = decision_in_tx.clone();
-        tokio::spawn(async move {
-            let mut fee_rx = fee_rx;
-            while let Some(fu) = fee_rx.recv().await {
-                if tx.send(DecisionInput::Fee(fu)).await.is_err() {
-                    break;
-                }
-            }
-        });
-    }
-    // Drop the original decision_in_tx so the channel closes when forwarders finish
     drop(decision_in_tx);
 
     // Decision actor
@@ -143,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.strategy.tau_min,
         config.strategy.liquidity_b,
         config.strategy.kelly_fraction,
-        config.bankroll.initial,
+        bankroll,
         config.strategy.max_volume_pct,
         config.strategy.min_confidence,
     );
@@ -151,57 +197,169 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         decision_actor.run().await;
     });
 
-    // Executor task
+    // Market fetcher (replaces simulator — uses real Polymarket data)
+    // Fetcher only needs read-only access — only executor needs auth
+    let fetcher_client =
+        PolymarketClient::new_readonly(&config.polymarket.gamma_url, &config.polymarket.clob_url);
+    let fetcher = MarketFetcher::new(
+        fetcher_client,
+        cli.asset.clone(),
+        cli.window.clone(),
+        config.polymarket.poll_interval_secs,
+    );
+    let fetcher_shutdown = shutdown_rx.clone();
+    let fetcher_db_tx = db_tx.clone();
+    tokio::spawn(async move {
+        fetcher
+            .run(
+                market_tx_signal,
+                market_tx_decision,
+                settle_tx,
+                fetcher_db_tx,
+                fetcher_shutdown,
+            )
+            .await;
+    });
+
+    // Executor task — handles fills + settlements + summary
     let exec_db_tx = db_tx.clone();
     let mut exec_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
-        let mut executor = PaperExecutor::new(config.bankroll.initial);
+        let exec_mode = if paper_trade { Mode::Paper } else { Mode::Live };
+        let mut executor = Executor::new(exec_mode, bankroll, exec_client);
+
+        let mut trades_placed: u32 = 0;
+        let mut trades_skipped: u32 = 0;
+        let mut markets_resolved: u32 = 0;
+        let mut wins: u32 = 0;
+        let mut losses: u32 = 0;
+        let mut total_fees: f64 = 0.0;
+        let mut total_pnl: f64 = 0.0;
+
         loop {
             tokio::select! {
+                // Register market tokens with executor
+                msg = market_reg_rx.recv() => {
+                    if let Some(ms) = msg {
+                        executor.register_market(&ms.market_id, &ms.token_yes, &ms.token_no);
+                    }
+                }
+
                 msg = decision_out_rx.recv() => {
                     match msg {
                         Some(DecisionOutput::Trade(dec)) => {
-                            // Use the decision price as simulated best bid/ask
                             let best_ask = dec.price;
                             let best_bid = dec.price;
-                            if let Some(_id) = executor.try_fill(&dec, best_ask, best_bid) {
+                            if executor.try_fill(&dec, best_ask, best_bid).await.is_some() {
+                                trades_placed += 1;
                                 let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
                             }
                         }
                         Some(DecisionOutput::Skip(nt)) => {
+                            trades_skipped += 1;
                             let _ = exec_db_tx.try_send(DbEvent::Skip(nt));
                         }
                         None => break,
                     }
                 }
+
+                msg = settle_rx.recv() => {
+                    if let Some(cmd) = msg {
+                        markets_resolved += 1;
+                        let results = executor.settle(&cmd.market_id, cmd.resolved_side, cmd.resolved_ts);
+
+                        for tr in &results {
+                            match tr.outcome {
+                                Outcome::Win => wins += 1,
+                                Outcome::Loss => losses += 1,
+                            }
+                            total_fees += tr.fee_paid;
+                            total_pnl += tr.pnl;
+
+                            tracing::info!(
+                                market = %tr.market_id,
+                                outcome = %tr.outcome,
+                                size = format_args!("${:.2}", tr.size),
+                                pnl = format_args!("{:+.2}", tr.pnl),
+                                bankroll = format_args!("${:.2}", tr.bankroll_after),
+                                "settled"
+                            );
+
+                            let _ = exec_db_tx.try_send(DbEvent::Trade(tr.clone()));
+                        }
+                    }
+                }
+
                 _ = exec_shutdown.changed() => {
-                    tracing::info!("executor shutting down");
+                    // Drain remaining settle commands
+                    while let Ok(cmd) = settle_rx.try_recv() {
+                        markets_resolved += 1;
+                        let results = executor.settle(&cmd.market_id, cmd.resolved_side, cmd.resolved_ts);
+                        for tr in &results {
+                            match tr.outcome {
+                                Outcome::Win => wins += 1,
+                                Outcome::Loss => losses += 1,
+                            }
+                            total_fees += tr.fee_paid;
+                            total_pnl += tr.pnl;
+                            let _ = exec_db_tx.try_send(DbEvent::Trade(tr.clone()));
+                        }
+                    }
                     break;
                 }
             }
         }
+
+        // Print summary
+        let final_bankroll = executor.bankroll();
+        let total_trades = wins + losses;
+        let win_rate = if total_trades > 0 {
+            100.0 * f64::from(wins) / f64::from(total_trades)
+        } else {
+            0.0
+        };
+        let return_pct = (final_bankroll - bankroll) / bankroll * 100.0;
+
+        tracing::info!("══════════════════════════════════════════");
+        tracing::info!("         TRADING SUMMARY ({mode_str})      ");
+        tracing::info!("══════════════════════════════════════════");
+        tracing::info!("  Markets resolved:   {markets_resolved}");
+        tracing::info!("  Trades placed:      {trades_placed}");
+        tracing::info!("  Signals skipped:    {trades_skipped}");
+        tracing::info!("  Wins / Losses:      {wins} / {losses}");
+        tracing::info!("  Win rate:           {win_rate:.1}%");
+        tracing::info!("  Total fees:         ${total_fees:.2}");
+        tracing::info!("  Net P&L:            {total_pnl:+.2}");
+        tracing::info!("  Starting bankroll:  ${bankroll:.2}");
+        tracing::info!("  Final bankroll:     ${final_bankroll:.2}");
+        tracing::info!("  Return:             {return_pct:+.2}%");
+        tracing::info!("══════════════════════════════════════════");
     });
 
-    // Keep market_tx_signal and market_tx_decision alive for future use
-    // (they would be used by a market-polling task; for now we hold references)
-    let _market_tx_signal = market_tx_signal;
-    let _market_tx_decision = market_tx_decision;
-    let _fee_tx = fee_tx;
+    // 11. Log startup info
+    tracing::info!(
+        "polymarket-bot v{} — {mode_str} mode — ${bankroll:.2} bankroll",
+        env!("CARGO_PKG_VERSION"),
+    );
+    tracing::info!("asset={:?} window={:?}", cli.asset, cli.window,);
+    if paper_trade {
+        tracing::info!("paper-trade mode: real market data, simulated execution");
+        tracing::info!("no API keys required — using public Polymarket endpoints");
+    } else {
+        tracing::info!("REAL trading mode: orders will be placed on Polymarket");
+    }
+    tracing::info!("press Ctrl+C to stop and see the summary");
 
-    // 8. Log startup info
-    tracing::info!("polymarket-bot starting in {} mode", config.general.mode);
-
-    // 9. Wait for ctrl+c
+    // 12. Wait for ctrl+c
     tokio::signal::ctrl_c().await?;
 
-    // 10. Send shutdown signal
-    tracing::info!("shutting down");
+    // 13. Send shutdown signal
+    tracing::info!("shutting down...");
     let _ = shutdown_tx.send(true);
 
-    // 11. Sleep 2 seconds for actors to flush
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // 14. Sleep for actors to flush
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    // 12. Log shutdown complete
-    tracing::info!("shutdown complete");
+    tracing::info!("shutdown complete — query data/bot.db for detailed dashboard data");
     Ok(())
 }
