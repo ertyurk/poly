@@ -1,0 +1,92 @@
+use polymarket_bot::actors::decision::decide;
+use polymarket_bot::actors::executor::PaperExecutor;
+use polymarket_bot::actors::signal::MarketWindow;
+use polymarket_bot::types::*;
+
+#[test]
+fn test_full_pipeline_paper_trade() {
+    // 1. Build a MarketWindow and feed 20 positive returns
+    let mut window = MarketWindow::new("test-mkt".to_string(), 0.001);
+    for i in 0..20 {
+        window.update(0.001, 0.003, i as f64);
+    }
+
+    let p_hat = window.p_hat();
+    assert!(
+        p_hat > 0.6,
+        "expected p_hat > 0.6, got {p_hat}"
+    );
+
+    // 2. Run the decision engine
+    let result = decide(
+        p_hat,
+        0.50,    // p_market
+        0.01,    // fee_rate
+        0.05,    // tau_min
+        100_000.0, // b (LMSR liquidity)
+        0.5,     // kelly_fraction
+        100_000.0, // bankroll
+        50_000.0,  // volume_24h
+        0.02,    // max_volume_pct
+        0.10,    // min_confidence (low threshold)
+        window.confidence(), // confidence
+        "test-mkt",
+    );
+
+    let decision = result.expect("expected a trade decision, got skip");
+    assert_eq!(decision.side, Side::Yes, "expected Yes side");
+    assert!(decision.size > 0.0, "expected positive size");
+
+    // 3. Paper-execute the trade
+    let mut executor = PaperExecutor::new(100_000.0);
+    let fill_id = executor.try_fill(&decision, 0.52, 0.48);
+    assert!(fill_id.is_some(), "expected fill to succeed");
+    assert_eq!(executor.position_count(), 1);
+
+    // 4. Settle: BTC went up, resolved YES (correct prediction)
+    let results = executor.settle("test-mkt", Side::Yes, now_micros());
+    assert_eq!(results.len(), 1);
+
+    let tr = &results[0];
+    assert_eq!(tr.outcome, Outcome::Win);
+    assert!(tr.pnl > 0.0, "expected positive pnl, got {}", tr.pnl);
+    assert!(
+        executor.bankroll() > 100_000.0,
+        "expected bankroll > 100k, got {}",
+        executor.bankroll()
+    );
+    assert_eq!(executor.position_count(), 0);
+}
+
+#[test]
+fn test_full_pipeline_skip_low_edge() {
+    // Feed only 2 near-zero returns — edge will be negligible
+    let mut window = MarketWindow::new("test-mkt-2".to_string(), 0.001);
+    for i in 0..2 {
+        window.update(0.00001, 0.003, i as f64);
+    }
+
+    let p_hat = window.p_hat();
+
+    // High fee (15m mid-bucket: 3.15%) should swamp the tiny edge
+    let result = decide(
+        p_hat,
+        0.50,    // p_market
+        0.0315,  // fee_rate (high 15m fee)
+        0.05,    // tau_min
+        100_000.0,
+        0.5,
+        100_000.0,
+        50_000.0,
+        0.02,
+        0.10,
+        window.confidence(),
+        "test-mkt-2",
+    );
+
+    assert!(
+        result.is_err(),
+        "expected skip (Err), but got Ok: {:#?}",
+        result.unwrap()
+    );
+}
