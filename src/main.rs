@@ -2,6 +2,8 @@
 mod config;
 #[allow(dead_code)]
 mod types;
+#[allow(dead_code)]
+mod math;
 
 use tracing_subscriber::EnvFilter;
 
