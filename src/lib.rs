@@ -1,3 +1,4 @@
 pub mod config;
-pub mod types;
+pub mod db;
 pub mod math;
+pub mod types;
