@@ -1,0 +1,39 @@
+[general]
+mode = "paper"
+log_level = "info"
+db_path = "data/bot.db"
+db_retention_days = 7
+
+[bankroll]
+initial = 100000.0
+
+[strategy]
+tau_min = 0.05
+kelly_fraction = 0.5
+max_volume_pct = 0.02
+min_confidence = 0.60
+liquidity_b = 100000.0
+
+[strategy.decay]
+spot_lambda = 0.00230
+news_lambda = 0.00019
+social_lambda = 0.00039
+onchain_lambda = 0.000096
+
+[markets]
+enabled = ["BTC_5m", "BTC_15m", "ETH_5m", "ETH_15m"]
+
+[binance]
+ws_url = "wss://stream.binance.com:9443/ws"
+streams = ["btcusdt@trade", "ethusdt@trade"]
+
+[polymarket]
+clob_url = "https://clob.polymarket.com"
+ws_url = "wss://ws-subscriptions-clob.polymarket.com"
+gamma_url = "https://gamma-api.polymarket.com"
+poll_interval_secs = 30
+fee_refresh_secs = 60
+
+[writer]
+batch_size = 100
+flush_interval_ms = 500

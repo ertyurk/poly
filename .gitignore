@@ -1,0 +1,6 @@
+.DS_Store
+/target
+data/bot.db
+data/bot.db-wal
+data/bot.db-shm
+.env
