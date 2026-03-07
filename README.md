@@ -1,39 +1,74 @@
-# polymarket-bot
+# trade
 
 Trading bot for [Polymarket](https://polymarket.com) crypto prediction markets. Connects to Binance for real-time spot prices and Polymarket for real market data, order books, and trade execution. Uses Bayesian signal processing, LMSR pricing, and Kelly-criterion position sizing.
 
 Supports **paper trading** (real data, simulated execution) and **live trading** (real orders via Polymarket CLOB API with EIP-712 signing).
 
+## Installation
+
+Install globally so you can run `trade` from anywhere:
+
+```bash
+cargo install --path .
+```
+
+To update after pulling new changes or bumping the version:
+
+```bash
+cargo install --path . --force
+```
+
+The binary is installed to `~/.cargo/bin/trade` (make sure `~/.cargo/bin` is in your `PATH`).
+
+### Shell completions
+
+Generate and install completions for your shell:
+
+```bash
+# Zsh
+trade completions zsh > ~/.zfunc/_trade
+# Add to .zshrc if not already there: fpath=(~/.zfunc $fpath)
+
+# Bash
+trade completions bash > ~/.bash_completion.d/trade
+
+# Fish
+trade completions fish > ~/.config/fish/completions/trade.fish
+```
+
 ## Usage
 
 ```bash
-polymarket-bot [OPTIONS]
+trade [OPTIONS] [COMMAND]
 
 Options:
     --asset <btc|eth|all>       Asset filter [default: all]
     --window <5m|15m|all>       Window filter [default: all]
     --bankroll <USD>            Starting bankroll (overrides config.toml)
     --paper-trade / --dry-run   Paper mode: real data, simulated execution
-    -c, --config <PATH>         Config file [default: config.toml]
+    --config <PATH>             Config file [default: config.toml]
+
+Commands:
+    completions <shell>         Generate shell completions (zsh, bash, fish)
 ```
 
 ### Examples
 
 ```bash
 # Paper trade BTC 5-minute markets with $100
-polymarket-bot --paper-trade --asset btc --window 5m --bankroll 100
+trade --paper-trade --asset btc --window 5m --bankroll 100
 
 # Paper trade all crypto markets with $500
-polymarket-bot --paper-trade --bankroll 500
+trade --paper-trade --bankroll 500
 
 # Paper trade ETH only, all windows
-polymarket-bot --paper-trade --asset eth
+trade --paper-trade --asset eth
 
 # Live trading (requires API keys in .env)
-polymarket-bot --asset btc --bankroll 1000
+trade --asset btc --bankroll 1000
 
 # Live trading with debug logging
-RUST_LOG=polymarket_bot=debug polymarket-bot --bankroll 5000
+RUST_LOG=polymarket_bot=debug trade --bankroll 5000
 ```
 
 ### Paper trade vs live trade
@@ -66,7 +101,7 @@ Paper mode gives you accurate P&L tracking against real market conditions withou
 # Build
 cargo build
 
-# Build optimized release (LTO enabled)
+# Build optimized release (full LTO enabled)
 cargo build --release
 
 # Run in paper-trade mode (no API keys needed)
@@ -88,7 +123,7 @@ cargo test
    ```
 3. Run without `--paper-trade`:
    ```bash
-   cargo run -- --asset btc --bankroll 1000
+   trade --asset btc --bankroll 1000
    ```
 
 ## How it works
@@ -169,14 +204,15 @@ See [`docs/dashboard-queries.md`](docs/dashboard-queries.md) for ready-to-use SQ
 ## Project structure
 
 ```
-polymarket-bot/
+trade/
 ├── Cargo.toml
 ├── config.toml
+├── rustfmt.toml
 ├── schema.sql
 ├── .env.example
 ├── src/
 │   ├── main.rs               # CLI parsing, actor wiring, startup
-│   ├── cli.rs                 # clap CLI definition
+│   ├── cli.rs                 # clap CLI + shell completions
 │   ├── config.rs              # TOML config parsing
 │   ├── types.rs               # Domain types and channel messages
 │   ├── actors/
@@ -208,8 +244,8 @@ polymarket-bot/
 
 - `#![forbid(unsafe_code)]`
 - Strict clippy: pedantic + nursery warnings, `unwrap`/`expect`/`panic` denied
-- Release: `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`, symbols stripped
-- Zero warnings
+- Release: `opt-level = 3`, full LTO, `codegen-units = 1`, symbols stripped
+- Zero warnings, `rustfmt` enforced (`max_width = 100`)
 - Hot-path functions `#[inline]`
 - `VecDeque` for O(1) observation window management
 - `Copy` types on hot-path messages

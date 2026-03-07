@@ -26,6 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Parse CLI
     let cli = Cli::parse();
 
+    // Handle subcommands (e.g. `trade completions zsh`)
+    if cli.handle_subcommand() {
+        return Ok(());
+    }
+
     // 2. Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(

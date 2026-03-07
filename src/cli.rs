@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 
 use crate::types::{Asset, Window};
 
@@ -8,7 +9,7 @@ use crate::types::{Asset, Window};
 /// Runs Bayesian signal processing + Kelly-criterion sizing to trade crypto
 /// prediction markets.
 #[derive(Parser, Debug)]
-#[command(name = "polymarket-bot", version, about)]
+#[command(name = "trade", version, about)]
 pub struct Cli {
     /// Asset filter: btc, eth, or all
     #[arg(long, default_value = "all", value_parser = parse_asset_filter)]
@@ -27,8 +28,35 @@ pub struct Cli {
     pub paper_trade: bool,
 
     /// Path to config file
-    #[arg(long, short, default_value = "config.toml")]
+    #[arg(long, default_value = "config.toml")]
     pub config: String,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Generate shell completions (zsh, bash, fish)
+    Completions {
+        /// Shell type
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+
+impl Cli {
+    /// Handle built-in subcommands (completions). Returns true if handled.
+    pub fn handle_subcommand(&self) -> bool {
+        match &self.command {
+            Some(Commands::Completions { shell }) => {
+                let mut cmd = Self::command();
+                generate(*shell, &mut cmd, "trade", &mut std::io::stdout());
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

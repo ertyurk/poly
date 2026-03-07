@@ -3,6 +3,10 @@ name = "polymarket-bot"
 version = "0.2.0"
 edition = "2021"
 
+[[bin]]
+name = "trade"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
@@ -17,6 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4.5"
 
 # Polymarket API client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
@@ -38,7 +43,7 @@ approx = "0.5"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = true
 codegen-units = 1
 strip = "symbols"
 
