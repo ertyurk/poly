@@ -1,3 +1,4 @@
+pub mod decision;
 pub mod executor;
 pub mod ingest;
 pub mod signal;
