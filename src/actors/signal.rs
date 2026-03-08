@@ -32,7 +32,7 @@ impl MarketWindow {
     /// `vol` = estimated volatility at this timescale.
     /// `elapsed` = seconds since window opened.
     pub fn update(&mut self, ret: f64, vol: f64, elapsed: f64) {
-        let p_up = bayesian::probability_from_return(ret, vol);
+        let p_up = bayesian::probability_from_return(ret, vol).clamp(1e-10, 1.0 - 1e-10);
         let p_down = 1.0 - p_up;
 
         let ll_ratio = p_up.ln() - p_down.ln();
@@ -97,7 +97,7 @@ impl SignalActor {
 
         // Bayesian state per market
         let mut windows: HashMap<String, MarketWindow> = HashMap::new();
-        // Track open prices per market
+        // Track spot open prices per market (first Binance price seen after market discovery)
         let mut open_prices: HashMap<String, f64> = HashMap::new();
         // Track which asset each market tracks
         let mut market_assets: HashMap<String, Asset> = HashMap::new();
@@ -124,9 +124,9 @@ impl SignalActor {
                     open_ts_map.insert(market_id.clone(), market.open_ts);
                     resolution_ts_map.insert(market_id.clone(), market.resolution_ts);
 
-                    if let Some(open_price) = market.open_price {
-                        open_prices.insert(market_id.clone(), open_price);
-                    }
+                    // Don't use market.open_price here — that's the Polymarket
+                    // probability, not the spot price. The first Binance tick
+                    // will set the real spot open price below.
 
                     windows
                         .entry(market_id)
@@ -140,9 +140,10 @@ impl SignalActor {
                             continue;
                         }
 
-                        let Some(&open_price) = open_prices.get(market_id) else {
-                            continue;
-                        };
+                        // Capture first spot price as open price for this market
+                        let open_price = *open_prices
+                            .entry(market_id.clone())
+                            .or_insert(spot.price);
 
                         // Skip markets past their resolution window
                         let resolution_ts = resolution_ts_map.get(market_id).copied().unwrap_or(i64::MAX);

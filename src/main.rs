@@ -26,32 +26,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Parse CLI
     let cli = Cli::parse();
 
-    // Handle subcommands (e.g. `trade completions zsh`)
-    if cli.handle_subcommand() {
-        return Ok(());
-    }
+    // 2. Load .env file from current directory (if present)
+    dotenvy::dotenv().ok();
 
-    // 2. Initialize tracing
+    // 3. Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive("polymarket_bot=info".parse()?),
         )
         .init();
 
-    // 3. Load config
+    // 4. Load config
     let config = config::Config::load(&cli.config)?;
 
-    // 4. Apply CLI overrides
+    // 5. Apply CLI overrides
     let bankroll = cli.bankroll.unwrap_or(config.bankroll.initial);
     let paper_trade = cli.paper_trade;
     let mode_str = if paper_trade { "paper" } else { "real" };
 
     tracing::info!(mode = mode_str, bankroll = bankroll, "loaded config");
 
-    // 5. Create data/ directory if needed
+    // 6. Create data/ directory if needed
     std::fs::create_dir_all("data").ok();
 
-    // 6. Build Polymarket client for order execution (live mode only)
+    // 7. Build Polymarket client for order execution (live mode only)
     let exec_client: Option<PolymarketClient> = if paper_trade {
         None
     } else {
@@ -77,10 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    // 7. Shutdown watch channel
+    // 8. Shutdown watch channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // 8. Create all mpsc channels
+    // 9. Create all mpsc channels
 
     // db_tx/db_rx — all actors send to writer
     let (db_tx, db_rx) = mpsc::channel::<DbEvent>(10_000);
@@ -106,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Market registration channel — market_fetcher → executor
     let (market_reg_tx, mut market_reg_rx) = mpsc::channel::<MarketState>(100);
 
-    // 9. Send config snapshot to DB
+    // 10. Send config snapshot to DB
     {
         let config_json = serde_json::to_string(&config)?;
         let _ = db_tx
@@ -117,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     }
 
-    // 10. Spawn all actors
+    // 11. Spawn all actors
 
     // Writer actor
     let mut writer = WriterActor::new(
@@ -226,10 +224,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    // Executor task — handles fills + settlements + summary
+    // Executor task — handles fills + settlements, returns stats
     let exec_db_tx = db_tx.clone();
     let mut exec_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
+    let exec_handle = tokio::spawn(async move {
         let exec_mode = if paper_trade { Mode::Paper } else { Mode::Live };
         let mut executor = Executor::new(exec_mode, bankroll, exec_client);
 
@@ -315,8 +313,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Print summary
-        let final_bankroll = executor.bankroll();
+        // Return stats for main to print after all actors finish
+        (
+            executor.bankroll(),
+            trades_placed,
+            trades_skipped,
+            markets_resolved,
+            wins,
+            losses,
+            total_fees,
+            total_pnl,
+        )
+    });
+
+    // 12. Log startup info
+    tracing::info!(
+        "polymarket-bot v{} — {mode_str} mode — ${bankroll:.2} bankroll",
+        env!("CARGO_PKG_VERSION"),
+    );
+    tracing::info!("asset={:?} window={:?}", cli.asset, cli.window,);
+    if paper_trade {
+        tracing::info!("paper-trade mode: real market data, simulated execution");
+        tracing::info!("no API keys required — using public Polymarket endpoints");
+    } else {
+        tracing::info!("REAL trading mode: orders will be placed on Polymarket");
+    }
+    tracing::info!("press Ctrl+C to stop and see the summary");
+
+    // 13. Wait for ctrl+c
+    tokio::signal::ctrl_c().await?;
+
+    // 14. Send shutdown signal
+    tracing::info!("shutting down...");
+    let _ = shutdown_tx.send(true);
+
+    // 15. Wait for actors to finish, then print summary
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    if let Ok((
+        final_bankroll,
+        trades_placed,
+        trades_skipped,
+        markets_resolved,
+        wins,
+        losses,
+        total_fees,
+        total_pnl,
+    )) = exec_handle.await
+    {
         let total_trades = wins + losses;
         let win_rate = if total_trades > 0 {
             100.0 * f64::from(wins) / f64::from(total_trades)
@@ -339,31 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("  Final bankroll:     ${final_bankroll:.2}");
         tracing::info!("  Return:             {return_pct:+.2}%");
         tracing::info!("══════════════════════════════════════════");
-    });
-
-    // 11. Log startup info
-    tracing::info!(
-        "polymarket-bot v{} — {mode_str} mode — ${bankroll:.2} bankroll",
-        env!("CARGO_PKG_VERSION"),
-    );
-    tracing::info!("asset={:?} window={:?}", cli.asset, cli.window,);
-    if paper_trade {
-        tracing::info!("paper-trade mode: real market data, simulated execution");
-        tracing::info!("no API keys required — using public Polymarket endpoints");
-    } else {
-        tracing::info!("REAL trading mode: orders will be placed on Polymarket");
     }
-    tracing::info!("press Ctrl+C to stop and see the summary");
-
-    // 12. Wait for ctrl+c
-    tokio::signal::ctrl_c().await?;
-
-    // 13. Send shutdown signal
-    tracing::info!("shutting down...");
-    let _ = shutdown_tx.send(true);
-
-    // 14. Sleep for actors to flush
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     tracing::info!("shutdown complete — query data/bot.db for detailed dashboard data");
     Ok(())

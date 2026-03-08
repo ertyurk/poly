@@ -87,7 +87,9 @@ impl WriterActor {
                     )?;
                 }
                 DbEvent::Signal(sig) => {
-                    db::queries::insert_signal(&tx, sig)?;
+                    if sig.p_hat.is_finite() && sig.confidence.is_finite() {
+                        db::queries::insert_signal(&tx, sig)?;
+                    }
                 }
                 DbEvent::Decision(dec) => {
                     let _ = db::queries::insert_decision(&tx, dec)?;

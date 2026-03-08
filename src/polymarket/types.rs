@@ -22,6 +22,11 @@ pub struct GammaMarket {
     pub tags: Option<Vec<String>>,
     #[serde(rename = "outcomePrices")]
     pub outcome_prices: Option<String>,
+    /// Outcomes as JSON string, e.g. `["Up", "Down"]` or `["Yes", "No"]`
+    pub outcomes: Option<String>,
+    /// Token IDs as JSON string when `tokens` array is absent
+    #[serde(rename = "clobTokenIds")]
+    pub clob_token_ids: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +34,19 @@ pub struct GammaToken {
     pub token_id: Option<String>,
     pub outcome: Option<String>,
     pub price: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// Gamma API — events (contain nested markets)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GammaEvent {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub slug: Option<String>,
+    pub markets: Option<Vec<GammaMarket>>,
 }
 
 // ---------------------------------------------------------------------------

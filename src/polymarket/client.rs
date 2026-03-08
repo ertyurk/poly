@@ -65,12 +65,13 @@ impl PolymarketClient {
     // Gamma API — market discovery (no auth needed)
     // -----------------------------------------------------------------------
 
-    /// Fetch crypto prediction markets from the Gamma API.
+    /// Fetch active crypto price prediction markets from the Gamma Events API.
+    /// Returns flattened markets from all matching events.
     pub async fn fetch_markets(
         &self,
     ) -> Result<Vec<GammaMarket>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
-            "{}/markets?tag=crypto&active=true&closed=false",
+            "{}/events?tag=crypto&active=true&closed=false&limit=100&order=volume24hr&ascending=false",
             self.gamma_url
         );
         let resp = self.http.get(&url).send().await?;
@@ -79,7 +80,11 @@ impl PolymarketClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("Gamma API {status}: {body}").into());
         }
-        let markets: Vec<GammaMarket> = resp.json().await?;
+        let events: Vec<GammaEvent> = resp.json().await?;
+        let markets: Vec<GammaMarket> = events
+            .into_iter()
+            .flat_map(|e| e.markets.unwrap_or_default())
+            .collect();
         Ok(markets)
     }
 

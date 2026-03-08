@@ -1,45 +1,13 @@
-# trade
+# polymarket-bot
 
 Trading bot for [Polymarket](https://polymarket.com) crypto prediction markets. Connects to Binance for real-time spot prices and Polymarket for real market data, order books, and trade execution. Uses Bayesian signal processing, LMSR pricing, and Kelly-criterion position sizing.
 
 Supports **paper trading** (real data, simulated execution) and **live trading** (real orders via Polymarket CLOB API with EIP-712 signing).
 
-## Installation
-
-Install globally so you can run `trade` from anywhere:
-
-```bash
-cargo install --path .
-```
-
-To update after pulling new changes or bumping the version:
-
-```bash
-cargo install --path . --force
-```
-
-The binary is installed to `~/.cargo/bin/trade` (make sure `~/.cargo/bin` is in your `PATH`).
-
-### Shell completions
-
-Generate and install completions for your shell:
-
-```bash
-# Zsh
-trade completions zsh > ~/.zfunc/_trade
-# Add to .zshrc if not already there: fpath=(~/.zfunc $fpath)
-
-# Bash
-trade completions bash > ~/.bash_completion.d/trade
-
-# Fish
-trade completions fish > ~/.config/fish/completions/trade.fish
-```
-
 ## Usage
 
 ```bash
-trade [OPTIONS] [COMMAND]
+cargo run -- [OPTIONS]
 
 Options:
     --asset <btc|eth|all>       Asset filter [default: all]
@@ -47,28 +15,25 @@ Options:
     --bankroll <USD>            Starting bankroll (overrides config.toml)
     --paper-trade / --dry-run   Paper mode: real data, simulated execution
     --config <PATH>             Config file [default: config.toml]
-
-Commands:
-    completions <shell>         Generate shell completions (zsh, bash, fish)
 ```
 
 ### Examples
 
 ```bash
 # Paper trade BTC 5-minute markets with $100
-trade --paper-trade --asset btc --window 5m --bankroll 100
+cargo run -- --paper-trade --asset btc --window 5m --bankroll 100
 
 # Paper trade all crypto markets with $500
-trade --paper-trade --bankroll 500
+cargo run -- --paper-trade --bankroll 500
 
 # Paper trade ETH only, all windows
-trade --paper-trade --asset eth
+cargo run -- --paper-trade --asset eth
 
 # Live trading (requires API keys in .env)
-trade --asset btc --bankroll 1000
+cargo run -- --asset btc --bankroll 1000
 
 # Live trading with debug logging
-RUST_LOG=polymarket_bot=debug trade --bankroll 5000
+RUST_LOG=polymarket_bot=debug cargo run -- --bankroll 5000
 ```
 
 ### Paper trade vs live trade
@@ -111,19 +76,27 @@ cargo run -- --paper-trade --bankroll 100
 cargo test
 ```
 
+### Environment variables
+
+The bot loads `.env` from the current directory automatically via `dotenvy`. Paper mode needs no env vars. Live mode requires:
+
+```bash
+# .env (in project root)
+POLYMARKET_API_KEY=your_key
+POLYMARKET_API_SECRET=your_secret_base64
+POLYMARKET_PASSPHRASE=your_passphrase
+PRIVATE_KEY=your_ethereum_private_key_hex
+```
+
+See `.env.example` for a template.
+
 ### Live trading setup
 
 1. Copy `.env.example` to `.env`
-2. Fill in your Polymarket API credentials:
-   ```
-   POLYMARKET_API_KEY=your_key
-   POLYMARKET_API_SECRET=your_secret_base64
-   POLYMARKET_PASSPHRASE=your_passphrase
-   PRIVATE_KEY=your_ethereum_private_key_hex
-   ```
+2. Fill in your Polymarket API credentials
 3. Run without `--paper-trade`:
    ```bash
-   trade --asset btc --bankroll 1000
+   cargo run -- --asset btc --bankroll 1000
    ```
 
 ## How it works
@@ -204,7 +177,7 @@ See [`docs/dashboard-queries.md`](docs/dashboard-queries.md) for ready-to-use SQ
 ## Project structure
 
 ```
-trade/
+polymarket-bot/
 ├── Cargo.toml
 ├── config.toml
 ├── rustfmt.toml
@@ -212,7 +185,7 @@ trade/
 ├── .env.example
 ├── src/
 │   ├── main.rs               # CLI parsing, actor wiring, startup
-│   ├── cli.rs                 # clap CLI + shell completions
+│   ├── cli.rs                 # clap CLI definition
 │   ├── config.rs              # TOML config parsing
 │   ├── types.rs               # Domain types and channel messages
 │   ├── actors/

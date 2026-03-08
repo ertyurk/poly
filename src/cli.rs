@@ -1,5 +1,4 @@
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
+use clap::Parser;
 
 use crate::types::{Asset, Window};
 
@@ -9,7 +8,7 @@ use crate::types::{Asset, Window};
 /// Runs Bayesian signal processing + Kelly-criterion sizing to trade crypto
 /// prediction markets.
 #[derive(Parser, Debug)]
-#[command(name = "trade", version, about)]
+#[command(name = "polymarket-bot", version, about)]
 pub struct Cli {
     /// Asset filter: btc, eth, or all
     #[arg(long, default_value = "all", value_parser = parse_asset_filter)]
@@ -30,33 +29,6 @@ pub struct Cli {
     /// Path to config file
     #[arg(long, default_value = "config.toml")]
     pub config: String,
-
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum Commands {
-    /// Generate shell completions (zsh, bash, fish)
-    Completions {
-        /// Shell type
-        #[arg(value_enum)]
-        shell: Shell,
-    },
-}
-
-impl Cli {
-    /// Handle built-in subcommands (completions). Returns true if handled.
-    pub fn handle_subcommand(&self) -> bool {
-        match &self.command {
-            Some(Commands::Completions { shell }) => {
-                let mut cmd = Self::command();
-                generate(*shell, &mut cmd, "trade", &mut std::io::stdout());
-                true
-            }
-            None => false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +74,9 @@ fn parse_window_filter(s: &str) -> Result<WindowFilter, String> {
     match s.to_lowercase().as_str() {
         "5m" | "5min" => Ok(WindowFilter::Single(Window::FiveMin)),
         "15m" | "15min" => Ok(WindowFilter::Single(Window::FifteenMin)),
+        "1h" | "hourly" => Ok(WindowFilter::Single(Window::Hourly)),
+        "1d" | "daily" => Ok(WindowFilter::Single(Window::Daily)),
         "all" => Ok(WindowFilter::All),
-        _ => Err(format!("unknown window: {s}. Use 5m, 15m, or all")),
+        _ => Err(format!("unknown window: {s}. Use 5m, 15m, 1h, 1d, or all")),
     }
 }

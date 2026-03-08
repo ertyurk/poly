@@ -137,22 +137,23 @@ impl MarketFetcher {
             if secs_until < 60 {
                 continue; // Skip markets resolving in < 1 minute
             }
+            // Skip markets resolving more than 48 hours out — our short-term
+            // Binance signal has no predictive power for weekly/monthly/yearly markets.
+            if secs_until > 48 * 3600 {
+                continue;
+            }
             let window = classify_window(secs_until);
             if !self.window_filter.matches(window) {
                 continue;
             }
 
-            // Extract tokens
-            let tokens = match gm.tokens.as_ref() {
-                Some(t) if t.len() >= 2 => t,
-                _ => continue,
-            };
-            let (token_yes, token_no) = extract_tokens(tokens);
+            // Extract tokens (handles both tokens array and clobTokenIds string)
+            let (token_yes, token_no) = extract_market_tokens(gm);
             if token_yes.is_empty() || token_no.is_empty() {
                 continue;
             }
 
-            // Fetch order book for the YES token to get initial prices
+            // Fetch order book for the positive token to get initial prices
             let book = match self.client.fetch_order_book(&token_yes).await {
                 Ok(b) => ParsedBook::from_response(&b),
                 Err(e) => {
@@ -161,16 +162,39 @@ impl MarketFetcher {
                 }
             };
 
+            // Skip illiquid markets (spread > 10% or no real order book)
+            if book.spread > 0.10 || (book.best_bid < f64::EPSILON && book.best_ask > 1.0 - f64::EPSILON) {
+                tracing::debug!(
+                    condition_id,
+                    spread = book.spread,
+                    "skipping illiquid market"
+                );
+                continue;
+            }
+
             let volume = gm
                 .volume
                 .as_deref()
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(10_000.0);
 
-            let open_price = tokens
-                .iter()
-                .find(|t| t.outcome.as_deref() == Some("Yes"))
-                .and_then(|t| t.price);
+            // Get open price from tokens array or outcomePrices
+            let open_price = gm
+                .tokens
+                .as_ref()
+                .and_then(|tokens| {
+                    tokens
+                        .iter()
+                        .find(|t| matches!(t.outcome.as_deref(), Some("Yes" | "Up")))
+                        .and_then(|t| t.price)
+                })
+                .or_else(|| {
+                    // Parse from outcomePrices JSON string (first element is positive outcome)
+                    gm.outcome_prices
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                        .and_then(|v| v.first().and_then(|p| p.parse::<f64>().ok()))
+                });
 
             let market_id = format!(
                 "{asset}_{window}_{cid}",
@@ -332,7 +356,7 @@ fn detect_asset(gm: &crate::polymarket::types::GammaMarket) -> Option<Asset> {
         let lower = s.to_lowercase();
         if lower.contains("btc") || lower.contains("bitcoin") {
             Some(Asset::BTC)
-        } else if lower.contains("eth") || lower.contains("ethereum") {
+        } else if lower.contains("ethereum") {
             Some(Asset::ETH)
         } else {
             None
@@ -365,32 +389,65 @@ fn parse_end_date(gm: &crate::polymarket::types::GammaMarket) -> Option<TsMicros
 const fn classify_window(secs_until_resolution: i64) -> Window {
     if secs_until_resolution <= 600 {
         Window::FiveMin
-    } else {
+    } else if secs_until_resolution <= 1800 {
         Window::FifteenMin
+    } else if secs_until_resolution <= 7200 {
+        Window::Hourly
+    } else {
+        Window::Daily
     }
 }
 
-fn extract_tokens(tokens: &[crate::polymarket::types::GammaToken]) -> (String, String) {
-    let mut yes_id = String::new();
-    let mut no_id = String::new();
-
-    for t in tokens {
-        match t.outcome.as_deref() {
-            Some("Yes") => {
-                if let Some(id) = &t.token_id {
-                    yes_id.clone_from(id);
+/// Extract (positive_token, negative_token) from a market.
+///
+/// Handles both:
+/// - `tokens` array with outcome "Yes"/"No" or "Up"/"Down"
+/// - `clobTokenIds` JSON string + `outcomes` JSON string (when tokens array is absent)
+fn extract_market_tokens(gm: &crate::polymarket::types::GammaMarket) -> (String, String) {
+    // Try the tokens array first
+    if let Some(tokens) = &gm.tokens {
+        if tokens.len() >= 2 {
+            let mut yes_id = String::new();
+            let mut no_id = String::new();
+            for t in tokens {
+                match t.outcome.as_deref() {
+                    Some("Yes" | "Up") => {
+                        if let Some(id) = &t.token_id {
+                            yes_id.clone_from(id);
+                        }
+                    }
+                    Some("No" | "Down") => {
+                        if let Some(id) = &t.token_id {
+                            no_id.clone_from(id);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Some("No") => {
-                if let Some(id) = &t.token_id {
-                    no_id.clone_from(id);
-                }
+            if !yes_id.is_empty() && !no_id.is_empty() {
+                return (yes_id, no_id);
             }
-            _ => {}
         }
     }
 
-    (yes_id, no_id)
+    // Fallback: parse clobTokenIds + outcomes JSON strings
+    let token_ids: Vec<String> = gm
+        .clob_token_ids
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let outcomes: Vec<String> = gm
+        .outcomes
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    if token_ids.len() >= 2 && outcomes.len() >= 2 {
+        // First outcome is positive (Yes/Up), second is negative (No/Down)
+        return (token_ids[0].clone(), token_ids[1].clone());
+    }
+
+    (String::new(), String::new())
 }
 
 fn determine_outcome(gm: &crate::polymarket::types::GammaMarket) -> Side {
@@ -405,7 +462,7 @@ fn determine_outcome(gm: &crate::polymarket::types::GammaMarket) -> Side {
     // Fallback: check token prices
     if let Some(tokens) = &gm.tokens {
         for t in tokens {
-            if t.outcome.as_deref() == Some("Yes") {
+            if matches!(t.outcome.as_deref(), Some("Yes" | "Up")) {
                 if let Some(price) = t.price {
                     return if price > 0.5 { Side::Yes } else { Side::No };
                 }

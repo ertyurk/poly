@@ -80,6 +80,24 @@ impl Executor {
             return None;
         }
 
+        // Check available bankroll (bankroll minus committed capital)
+        let committed: f64 = self
+            .positions
+            .iter()
+            .map(|p| p.size * p.entry_price)
+            .sum();
+        let available = self.bankroll - committed;
+        let cost = dec.size * dec.price;
+        if cost > available {
+            tracing::debug!(
+                market_id = %dec.market_id,
+                cost = cost,
+                available = available,
+                "fill rejected: insufficient bankroll"
+            );
+            return None;
+        }
+
         let fill_price = match dec.side {
             Side::Yes => best_ask,
             Side::No => 1.0 - best_bid,

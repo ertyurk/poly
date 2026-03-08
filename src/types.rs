@@ -21,6 +21,8 @@ impl fmt::Display for Asset {
 pub enum Window {
     FiveMin,
     FifteenMin,
+    Hourly,
+    Daily,
 }
 
 impl Window {
@@ -29,6 +31,8 @@ impl Window {
         match self {
             Self::FiveMin => "5m",
             Self::FifteenMin => "15m",
+            Self::Hourly => "1h",
+            Self::Daily => "1d",
         }
     }
 }
