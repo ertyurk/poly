@@ -11,7 +11,7 @@ use actors::executor::{Executor, Mode};
 use actors::ingest::IngestActor;
 use actors::market_fetcher::MarketFetcher;
 use actors::signal::{AssetTracker, SignalActor};
-use actors::telegram::{TelegramActor, TelegramAlert};
+use actors::telegram::{TelegramActor, TelegramAlert, TelegramStats};
 use actors::writer::WriterActor;
 use cli::Cli;
 use polymarket::PolymarketClient;
@@ -19,6 +19,7 @@ use types::*;
 
 use clap::Parser;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 
@@ -253,15 +254,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Telegram alert actor (optional — only spawned if configured)
+    let tg_stats: Arc<TelegramStats> = Arc::new(TelegramStats::new(bankroll));
     let telegram_tx: Option<mpsc::Sender<TelegramAlert>> = if let Some(ref tg) = config.telegram {
         if tg.enabled {
             let (tg_tx, tg_rx) = mpsc::channel::<TelegramAlert>(100);
-            let actor = TelegramActor::new(tg.bot_token.clone(), tg.chat_id.clone());
+            let actor = TelegramActor::new(
+                tg.bot_token.clone(),
+                tg.chat_id.clone(),
+                tg.summary_interval_mins,
+                Arc::clone(&tg_stats),
+            );
             let tg_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
                 actor.run(tg_rx, tg_shutdown).await;
             });
-            tracing::info!("telegram alerts enabled");
+            tracing::info!(
+                summary_interval_mins = tg.summary_interval_mins,
+                "telegram alerts enabled with periodic summary"
+            );
             Some(tg_tx)
         } else {
             None
@@ -269,6 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    let exec_tg_stats = Arc::clone(&tg_stats);
 
     // Executor task — handles fills + settlements, returns stats
     let exec_db_tx = db_tx.clone();
@@ -302,6 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let best_bid = dec.price;
                             if executor.try_fill(&dec, best_ask, best_bid).await.is_some() {
                                 trades_placed += 1;
+                                exec_tg_stats.record_fill();
                                 if let Some(ref tg) = telegram_tx {
                                     let _ = tg.try_send(TelegramAlert::TradeFilled(dec.clone()));
                                 }
@@ -338,6 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "settled"
                             );
 
+                            exec_tg_stats.record_settlement(tr).await;
                             if let Some(ref tg) = telegram_tx {
                                 let _ = tg.try_send(TelegramAlert::TradeSettled(tr.clone()));
                             }

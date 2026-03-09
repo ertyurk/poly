@@ -79,6 +79,13 @@ pub struct Telegram {
     pub bot_token: String,
     pub chat_id: String,
     pub enabled: bool,
+    /// Send a P&L summary every N minutes (default: 30).
+    #[serde(default = "default_summary_interval")]
+    pub summary_interval_mins: u64,
+}
+
+const fn default_summary_interval() -> u64 {
+    30
 }
 
 impl Config {

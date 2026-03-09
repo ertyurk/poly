@@ -118,3 +118,5 @@ flush_interval_ms = 500
 # chat_id = "123456789"
 # # Enable/disable Telegram alerts.
 # enabled = true
+# # Send periodic P&L summary every N minutes (default: 30).
+# summary_interval_mins = 30
