@@ -92,6 +92,7 @@ fn test_insert_decision_and_trade() {
         bankroll_after: 100_470.0,
         entry_ts: 1500000,
         resolved_ts: 2000000,
+        estimated_slippage: 0.0,
     };
     db::queries::insert_trade(&conn, &tr).unwrap();
 

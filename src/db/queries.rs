@@ -112,8 +112,8 @@ pub fn insert_skip(conn: &Connection, skip: &NoTrade) -> Result<i64, rusqlite::E
 
 pub fn insert_trade(conn: &Connection, tr: &TradeResult) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO trades (decision_id, market_id, side, entry_price, size, fee_rate, fee_paid, gross_pnl, outcome, pnl, bankroll_after, entry_ts, resolved_ts)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO trades (decision_id, market_id, side, entry_price, size, fee_rate, fee_paid, gross_pnl, outcome, pnl, bankroll_after, entry_ts, resolved_ts, estimated_slippage)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             tr.decision_id,
             tr.market_id,
@@ -128,6 +128,7 @@ pub fn insert_trade(conn: &Connection, tr: &TradeResult) -> Result<(), rusqlite:
             tr.bankroll_after,
             tr.entry_ts,
             tr.resolved_ts,
+            tr.estimated_slippage,
         ],
     )?;
     Ok(())
@@ -143,4 +144,65 @@ pub fn insert_config_snapshot(
         params![json, ts],
     )?;
     Ok(())
+}
+
+/// Persisted signal state for warm-up recovery.
+#[derive(Debug, Clone)]
+pub struct SavedSignalState {
+    pub asset: String,
+    pub last_price: f64,
+    pub last_ts: i64,
+    pub valid_ticks: u32,
+    pub variance: f64,
+    pub drift: f64,
+    pub lambda: f64,
+}
+
+pub fn save_signal_state(
+    conn: &Connection,
+    state: &SavedSignalState,
+    saved_at: TsMicros,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO signal_state (asset, last_price, last_ts, valid_ticks, variance, drift, lambda, saved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            state.asset,
+            state.last_price,
+            state.last_ts,
+            state.valid_ticks,
+            state.variance,
+            state.drift,
+            state.lambda,
+            saved_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn load_signal_states(
+    conn: &Connection,
+    max_age_secs: i64,
+) -> Result<Vec<SavedSignalState>, rusqlite::Error> {
+    let cutoff = crate::types::now_micros() - max_age_secs * 1_000_000;
+    let mut stmt = conn.prepare(
+        "SELECT asset, last_price, last_ts, valid_ticks, variance, drift, lambda
+         FROM signal_state WHERE saved_at > ?1",
+    )?;
+    let rows = stmt.query_map(params![cutoff], |row| {
+        Ok(SavedSignalState {
+            asset: row.get(0)?,
+            last_price: row.get(1)?,
+            last_ts: row.get(2)?,
+            valid_ticks: row.get(3)?,
+            variance: row.get(4)?,
+            drift: row.get(5)?,
+            lambda: row.get(6)?,
+        })
+    })?;
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
 }

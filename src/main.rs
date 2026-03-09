@@ -10,13 +10,15 @@ use actors::decision::{DecisionActor, DecisionInput, DecisionOutput};
 use actors::executor::{Executor, Mode};
 use actors::ingest::IngestActor;
 use actors::market_fetcher::MarketFetcher;
-use actors::signal::SignalActor;
+use actors::signal::{AssetTracker, SignalActor};
+use actors::telegram::{TelegramActor, TelegramAlert};
 use actors::writer::WriterActor;
 use cli::Cli;
 use polymarket::PolymarketClient;
 use types::*;
 
 use clap::Parser;
+use std::collections::HashMap;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 
@@ -142,8 +144,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Signal actor
-    let signal_actor = SignalActor::new(config.clone());
+    // Signal actor — load warm-up state from previous session if available
+    let warm_trackers = {
+        let warm_conn = db::init(&config.general.db_path)?;
+        // Accept state saved within the last 30 minutes
+        let states = db::queries::load_signal_states(&warm_conn, 1800).unwrap_or_default();
+        let mut trackers: HashMap<Asset, AssetTracker> = HashMap::new();
+        for s in states {
+            let asset = match s.asset.as_str() {
+                "BTC" => Asset::BTC,
+                "ETH" => Asset::ETH,
+                _ => continue,
+            };
+            trackers.insert(
+                asset,
+                AssetTracker::restore(
+                    s.last_price,
+                    s.last_ts,
+                    s.valid_ticks,
+                    s.variance,
+                    s.drift,
+                    s.lambda,
+                ),
+            );
+        }
+        trackers
+    };
+    let signal_actor = SignalActor::new(config.clone()).with_warm_state(warm_trackers);
     let signal_db_tx = db_tx.clone();
     let signal_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
@@ -225,6 +252,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
+    // Telegram alert actor (optional — only spawned if configured)
+    let telegram_tx: Option<mpsc::Sender<TelegramAlert>> = if let Some(ref tg) = config.telegram {
+        if tg.enabled {
+            let (tg_tx, tg_rx) = mpsc::channel::<TelegramAlert>(100);
+            let actor = TelegramActor::new(tg.bot_token.clone(), tg.chat_id.clone());
+            let tg_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                actor.run(tg_rx, tg_shutdown).await;
+            });
+            tracing::info!("telegram alerts enabled");
+            Some(tg_tx)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Executor task — handles fills + settlements, returns stats
     let exec_db_tx = db_tx.clone();
     let mut exec_shutdown = shutdown_rx.clone();
@@ -257,6 +302,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let best_bid = dec.price;
                             if executor.try_fill(&dec, best_ask, best_bid).await.is_some() {
                                 trades_placed += 1;
+                                if let Some(ref tg) = telegram_tx {
+                                    let _ = tg.try_send(TelegramAlert::TradeFilled(dec.clone()));
+                                }
                                 let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
                             }
                         }
@@ -290,6 +338,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "settled"
                             );
 
+                            if let Some(ref tg) = telegram_tx {
+                                let _ = tg.try_send(TelegramAlert::TradeSettled(tr.clone()));
+                            }
                             let _ = exec_db_tx.try_send(DbEvent::Trade(tr.clone()));
                         }
                     }

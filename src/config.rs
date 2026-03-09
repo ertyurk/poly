@@ -9,6 +9,7 @@ pub struct Config {
     pub binance: Binance,
     pub polymarket: Polymarket,
     pub writer: Writer,
+    pub telegram: Option<Telegram>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -71,6 +72,13 @@ pub struct Polymarket {
 pub struct Writer {
     pub batch_size: usize,
     pub flush_interval_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Telegram {
+    pub bot_token: String,
+    pub chat_id: String,
+    pub enabled: bool,
 }
 
 impl Config {

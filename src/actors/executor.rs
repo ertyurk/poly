@@ -4,6 +4,23 @@ use crate::types::*;
 /// Maximum price slippage tolerance (fraction) before rejecting a fill.
 const MAX_SLIPPAGE: f64 = 0.10;
 
+/// Estimate slippage for paper trading based on order size and spread.
+///
+/// Model: slippage = half_spread + size_impact
+/// - half_spread: we cross the spread to get filled
+/// - size_impact: larger orders move the price proportionally
+///   (linear impact model: impact = size / (size + liquidity_depth))
+///
+/// Returns the slippage as a price delta (always positive).
+#[inline]
+fn estimate_slippage(spread: f64, size: f64) -> f64 {
+    let half_spread = spread / 2.0;
+    // Assume ~$50k liquidity depth on each side for typical Polymarket crypto markets
+    const LIQUIDITY_DEPTH: f64 = 50_000.0;
+    let size_impact = size / (size + LIQUIDITY_DEPTH) * 0.02; // max 2% impact
+    half_spread + size_impact
+}
+
 #[derive(Debug, Clone)]
 struct OpenPosition {
     decision_id: i64,
@@ -13,6 +30,7 @@ struct OpenPosition {
     size: f64,
     fee_rate: f64,
     entry_ts: TsMicros,
+    estimated_slippage: f64,
 }
 
 /// Determines whether the executor places real orders or simulates fills.
@@ -109,7 +127,7 @@ impl Executor {
             return None;
         }
 
-        let fill_price = match dec.side {
+        let mut fill_price = match dec.side {
             Side::Yes => best_ask,
             Side::No => 1.0 - best_bid,
         };
@@ -127,14 +145,25 @@ impl Executor {
 
         let token_id = self.token_for_trade(&dec.market_id, dec.side);
 
+        // Compute slippage for paper mode
+        let spread = (best_ask - best_bid).abs();
+        let slippage = if self.mode == Mode::Paper {
+            estimate_slippage(spread, dec.size)
+        } else {
+            0.0
+        };
+
         match self.mode {
             Mode::Paper => {
+                // Apply slippage: buying pushes price up, selling pushes price down
+                fill_price = (fill_price + slippage).clamp(0.01, 0.99);
                 tracing::info!(
                     market_id = %dec.market_id,
                     side = %dec.side,
                     size = dec.size,
                     price = fill_price,
-                    "paper fill"
+                    slippage = format_args!("{:.4}", slippage),
+                    "paper fill (with slippage)"
                 );
             }
             Mode::Live => {
@@ -203,6 +232,7 @@ impl Executor {
             size: dec.size,
             fee_rate: dec.fee_rate,
             entry_ts: dec.ts,
+            estimated_slippage: slippage,
         });
 
         Some(id)
@@ -250,6 +280,7 @@ impl Executor {
                 bankroll_after: self.bankroll,
                 entry_ts: pos.entry_ts,
                 resolved_ts,
+                estimated_slippage: pos.estimated_slippage,
             });
         }
 
