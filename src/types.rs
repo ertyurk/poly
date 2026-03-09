@@ -43,6 +43,32 @@ impl fmt::Display for Window {
     }
 }
 
+/// Classifies what a Polymarket question is actually asking.
+///
+/// This determines how we compute p_hat (probability of YES resolving).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MarketType {
+    /// YES = price > strike at resolution
+    Above(f64),
+    /// YES = price < strike at resolution
+    Below(f64),
+    /// YES = lower < price < upper at resolution
+    Between(f64, f64),
+    /// YES = price went up from open
+    UpDown,
+}
+
+impl fmt::Display for MarketType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Above(k) => write!(f, "above_{k}"),
+            Self::Below(k) => write!(f, "below_{k}"),
+            Self::Between(lo, hi) => write!(f, "between_{lo}_{hi}"),
+            Self::UpDown => f.write_str("up_or_down"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Side {
     Yes,
@@ -126,19 +152,7 @@ pub struct MarketState {
     pub open_ts: TsMicros,
     pub open_price: Option<f64>,
     pub volume_24h: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct FeeScheduleEntry {
-    pub prob_low: f64,
-    pub prob_high: f64,
-    pub fee_bps: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct FeeUpdate {
-    pub window: Window,
-    pub schedule: Vec<FeeScheduleEntry>,
+    pub market_type: MarketType,
 }
 
 #[derive(Debug, Clone)]
@@ -181,7 +195,9 @@ pub struct TradeResult {
     pub side: Side,
     pub entry_price: f64,
     pub size: f64,
+    pub fee_rate: f64,
     pub fee_paid: f64,
+    pub gross_pnl: f64,
     pub outcome: Outcome,
     pub pnl: f64,
     pub bankroll_after: f64,

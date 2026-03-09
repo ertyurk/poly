@@ -194,6 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.strategy.kelly_fraction,
         bankroll,
         config.strategy.max_volume_pct,
+        config.strategy.max_bet_fraction,
         config.strategy.min_confidence,
     );
     tokio::spawn(async move {
@@ -229,7 +230,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut exec_shutdown = shutdown_rx.clone();
     let exec_handle = tokio::spawn(async move {
         let exec_mode = if paper_trade { Mode::Paper } else { Mode::Live };
-        let mut executor = Executor::new(exec_mode, bankroll, exec_client);
+        let mut executor =
+            Executor::new(exec_mode, bankroll, exec_client, config.strategy.max_total_exposure);
 
         let mut trades_placed: u32 = 0;
         let mut trades_skipped: u32 = 0;

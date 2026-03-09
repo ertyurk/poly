@@ -112,15 +112,17 @@ pub fn insert_skip(conn: &Connection, skip: &NoTrade) -> Result<i64, rusqlite::E
 
 pub fn insert_trade(conn: &Connection, tr: &TradeResult) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO trades (decision_id, market_id, side, entry_price, size, fee_paid, outcome, pnl, bankroll_after, entry_ts, resolved_ts)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO trades (decision_id, market_id, side, entry_price, size, fee_rate, fee_paid, gross_pnl, outcome, pnl, bankroll_after, entry_ts, resolved_ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             tr.decision_id,
             tr.market_id,
             tr.side.to_string(),
             tr.entry_price,
             tr.size,
+            tr.fee_rate,
             tr.fee_paid,
+            tr.gross_pnl,
             tr.outcome.to_string(),
             tr.pnl,
             tr.bankroll_after,

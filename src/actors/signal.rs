@@ -5,16 +5,170 @@ use crate::config::Config;
 use crate::math::{bayesian, decay};
 use crate::types::*;
 
+/// Minimum fraction of window elapsed before emitting signals.
+/// Trading later = more information = higher accuracy.
+/// At 65% elapsed in a 5-min window (1.75min remaining), a 0.1% BTC move
+/// gives p_hat ≈ 0.90, yielding high-confidence directional bets.
+const MIN_ELAPSED_PCT: f64 = 0.65;
+
 /// Maximum number of observations to retain per market window.
 const MAX_OBSERVATIONS: usize = 300;
 
-/// Placeholder volatility estimate.
-const DEFAULT_VOL: f64 = 0.003;
+/// Initial per-second volatility estimate (~2.5% daily for BTC).
+const INITIAL_VOL: f64 = 0.00008;
 
-/// Tracks Bayesian state for one market window
+/// Minimum volatility floor to prevent division by near-zero.
+const MIN_VOL: f64 = 0.00002;
+
+/// Minimum valid updates before emitting signals (~30 seconds of data).
+const MIN_TICKS: u32 = 30;
+
+// ---------------------------------------------------------------------------
+// Log-normal probability model (for Above/Below/Between markets)
+// ---------------------------------------------------------------------------
+
+/// Logistic approximation of standard normal CDF: Φ(x) ≈ 1/(1 + exp(-1.7x))
+#[inline]
+fn normal_cdf_approx(x: f64) -> f64 {
+    1.0 / (1.0 + (-1.7 * x).exp())
+}
+
+/// Compute p_hat using the log-normal model (for strike-based markets).
+fn compute_p_hat_lognormal(
+    current_price: f64,
+    market_type: MarketType,
+    open_spot_price: f64,
+    vol_per_sec: f64,
+    drift_per_sec: f64,
+    time_to_expiry_secs: f64,
+) -> f64 {
+    if time_to_expiry_secs <= 0.0 {
+        return 0.5;
+    }
+
+    let sigma_t = vol_per_sec * time_to_expiry_secs.sqrt();
+    if sigma_t < 1e-12 {
+        return 0.5;
+    }
+
+    let drift_t = drift_per_sec * time_to_expiry_secs;
+
+    match market_type {
+        MarketType::Above(strike) => {
+            if strike <= 0.0 {
+                return 1.0;
+            }
+            let d = ((current_price / strike).ln() + drift_t) / sigma_t;
+            normal_cdf_approx(d)
+        }
+        MarketType::Below(strike) => {
+            if strike <= 0.0 {
+                return 0.0;
+            }
+            let d = ((current_price / strike).ln() + drift_t) / sigma_t;
+            1.0 - normal_cdf_approx(d)
+        }
+        MarketType::Between(lo, hi) => {
+            if lo <= 0.0 || hi <= 0.0 {
+                return 0.5;
+            }
+            let d_lo = ((current_price / lo).ln() + drift_t) / sigma_t;
+            let d_hi = ((current_price / hi).ln() + drift_t) / sigma_t;
+            (normal_cdf_approx(d_lo) - normal_cdf_approx(d_hi)).clamp(0.0, 1.0)
+        }
+        MarketType::UpDown => {
+            // UpDown = "price went up from open" = Above(open_spot_price)
+            if open_spot_price <= 0.0 {
+                return 0.5;
+            }
+            let d = ((current_price / open_spot_price).ln() + drift_t) / sigma_t;
+            normal_cdf_approx(d)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AssetTracker — estimates realized vol and drift from tick stream
+// ---------------------------------------------------------------------------
+
+struct AssetTracker {
+    last_price: f64,
+    last_ts: TsMicros,
+    /// Count of valid updates (spaced ≥ 0.1s apart) — NOT raw ticks.
+    valid_ticks: u32,
+    /// Exponentially-weighted per-second variance estimate.
+    variance: f64,
+    /// Exponentially-weighted per-second drift estimate.
+    drift: f64,
+    lambda: f64,
+}
+
+impl AssetTracker {
+    fn new(lambda: f64) -> Self {
+        Self {
+            last_price: 0.0,
+            last_ts: 0,
+            valid_ticks: 0,
+            variance: INITIAL_VOL * INITIAL_VOL,
+            drift: 0.0,
+            lambda,
+        }
+    }
+
+    /// Update with a new price tick. Returns true if enough data for signals.
+    fn update(&mut self, price: f64, ts: TsMicros) -> bool {
+        if self.valid_ticks == 0 {
+            self.last_price = price;
+            self.last_ts = ts;
+            self.valid_ticks = 1;
+            return false;
+        }
+
+        let dt_secs = ((ts - self.last_ts) as f64) / 1_000_000.0;
+
+        // Only count updates with meaningful time gaps (≥ 0.1s, < 60s)
+        if dt_secs >= 0.1 && dt_secs < 60.0 {
+            let log_ret = (price / self.last_price).ln();
+            let var_sample = log_ret * log_ret / dt_secs;
+            let ret_per_sec = log_ret / dt_secs;
+
+            let alpha = (1.0 - (-self.lambda * dt_secs).exp()).clamp(0.001, 0.5);
+            self.variance = (1.0 - alpha) * self.variance + alpha * var_sample;
+            self.drift = (1.0 - alpha) * self.drift + alpha * ret_per_sec;
+
+            self.last_price = price;
+            self.last_ts = ts;
+            self.valid_ticks += 1;
+        }
+
+        self.valid_ticks >= MIN_TICKS
+    }
+
+    fn vol_per_sec(&self) -> f64 {
+        self.variance.sqrt().max(MIN_VOL)
+    }
+
+    fn drift_per_sec(&self) -> f64 {
+        self.drift
+    }
+
+    fn current_price(&self) -> f64 {
+        self.last_price
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MarketWindow — Bayesian momentum accumulator for UpDown markets
+// ---------------------------------------------------------------------------
+
+/// Tracks Bayesian state for one market window.
+///
+/// Accumulates decay-weighted log-likelihood ratios from consecutive price
+/// observations, building conviction in a directional trend. Well-suited for
+/// "Up or Down" markets where the question is about directional momentum.
 pub struct MarketWindow {
     lambda: f64,
-    observations: VecDeque<(f64, f64)>, // (log_likelihood_ratio, elapsed_secs from window start)
+    observations: VecDeque<(f64, f64)>, // (log_likelihood_ratio, elapsed_secs)
     count: u32,
 }
 
@@ -59,12 +213,10 @@ impl MarketWindow {
             weighted_ll_sum += w * ll_ratio;
         }
 
-        // Normalize: p_up = sigmoid(weighted_ll_sum) via binary normalization
         let (p_up, _) = bayesian::normalize_binary(weighted_ll_sum, 0.0);
         p_up
     }
 
-    /// Confidence: distance from 0.5, scaled to [0, 1].
     #[inline]
     pub fn confidence(&self) -> f64 {
         (self.p_hat() - 0.5).abs() * 2.0
@@ -75,6 +227,21 @@ impl MarketWindow {
         self.count
     }
 }
+
+// ---------------------------------------------------------------------------
+// Market metadata
+// ---------------------------------------------------------------------------
+
+struct MarketMeta {
+    asset: Asset,
+    market_type: MarketType,
+    resolution_ts: TsMicros,
+    open_ts: TsMicros,
+}
+
+// ---------------------------------------------------------------------------
+// SignalActor
+// ---------------------------------------------------------------------------
 
 pub struct SignalActor {
     config: Config,
@@ -95,19 +262,14 @@ impl SignalActor {
     ) {
         let lambda = self.config.strategy.decay.spot_lambda;
 
-        // Bayesian state per market
-        let mut windows: HashMap<String, MarketWindow> = HashMap::new();
-        // Track spot open prices per market (first Binance price seen after market discovery)
-        let mut open_prices: HashMap<String, f64> = HashMap::new();
-        // Track which asset each market tracks
-        let mut market_assets: HashMap<String, Asset> = HashMap::new();
-        // Track market open timestamps
-        let mut open_ts_map: HashMap<String, TsMicros> = HashMap::new();
-        // Track market resolution timestamps (stop processing after expiry)
-        let mut resolution_ts_map: HashMap<String, TsMicros> = HashMap::new();
-        // Throttle: only process one observation per second per market
-        // (Binance sends ~4000 ticks/sec; 300 obs at 1 Hz = 5 min window matching decay half-life)
-        let mut last_update_ts: HashMap<String, TsMicros> = HashMap::new();
+        // Per-asset volatility & drift tracking
+        let mut asset_trackers: HashMap<Asset, AssetTracker> = HashMap::new();
+        // Per-market metadata
+        let mut market_meta: HashMap<String, MarketMeta> = HashMap::new();
+        // Per-market spot open prices (first spot price seen after market discovery)
+        let mut open_spot_prices: HashMap<String, f64> = HashMap::new();
+        // Throttle: max 1 signal per second per market
+        let mut last_signal_ts: HashMap<String, TsMicros> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -120,66 +282,92 @@ impl SignalActor {
 
                 Some(market) = market_rx.recv() => {
                     let market_id = market.market_id.clone();
-                    market_assets.insert(market_id.clone(), market.asset);
-                    open_ts_map.insert(market_id.clone(), market.open_ts);
-                    resolution_ts_map.insert(market_id.clone(), market.resolution_ts);
-
-                    // Don't use market.open_price here — that's the Polymarket
-                    // probability, not the spot price. The first Binance tick
-                    // will set the real spot open price below.
-
-                    windows
-                        .entry(market_id)
-                        .or_insert_with(|| MarketWindow::new(lambda));
+                    market_meta.insert(market_id, MarketMeta {
+                        asset: market.asset,
+                        market_type: market.market_type,
+                        resolution_ts: market.resolution_ts,
+                        open_ts: market.open_ts,
+                    });
                 }
 
                 Some(spot) = spot_rx.recv() => {
-                    // Update all market windows that track this asset
-                    for (market_id, &asset) in &market_assets {
-                        if asset != spot.asset {
+                    // Update per-asset tracker (vol/drift estimation)
+                    let tracker = asset_trackers
+                        .entry(spot.asset)
+                        .or_insert_with(|| AssetTracker::new(lambda));
+
+                    let ready = tracker.update(spot.price, spot.ts);
+                    if !ready {
+                        continue;
+                    }
+
+                    let vol = tracker.vol_per_sec();
+
+                    // Emit signals for all markets tracking this asset
+                    for (market_id, meta) in &market_meta {
+                        if meta.asset != spot.asset {
+                            continue;
+                        }
+                        if spot.ts >= meta.resolution_ts {
                             continue;
                         }
 
-                        // Capture first spot price as open price for this market
-                        let open_price = *open_prices
+                        // Capture open spot price EARLY — before the elapsed
+                        // filter so we measure displacement from actual open,
+                        // not from when we start emitting signals.
+                        let open_spot = *open_spot_prices
                             .entry(market_id.clone())
                             .or_insert(spot.price);
 
-                        // Skip markets past their resolution window
-                        let resolution_ts = resolution_ts_map.get(market_id).copied().unwrap_or(i64::MAX);
-                        if spot.ts >= resolution_ts {
+                        // Only emit signals after enough of the window has elapsed.
+                        // Trading later = more data = higher accuracy.
+                        let total_duration =
+                            (meta.resolution_ts - meta.open_ts) as f64;
+                        let elapsed_us =
+                            (spot.ts - meta.open_ts) as f64;
+                        if total_duration > 0.0
+                            && (elapsed_us / total_duration) < MIN_ELAPSED_PCT
+                        {
                             continue;
                         }
 
-                        // Throttle: max 1 observation per second per market
-                        let prev_ts = last_update_ts.get(market_id).copied().unwrap_or(0);
-                        if (spot.ts - prev_ts) < 1_000_000 {
+                        // Throttle: 1 signal/sec/market
+                        let prev = last_signal_ts.get(market_id).copied().unwrap_or(0);
+                        if (spot.ts - prev) < 1_000_000 {
                             continue;
                         }
-                        last_update_ts.insert(market_id.clone(), spot.ts);
+                        last_signal_ts.insert(market_id.clone(), spot.ts);
 
-                        let ret = (spot.price - open_price) / open_price;
-                        let open_ts = open_ts_map.get(market_id).copied().unwrap_or(spot.ts);
-                        let elapsed = ((spot.ts - open_ts) as f64) / 1_000_000.0; // micros to secs
+                        let time_to_expiry =
+                            ((meta.resolution_ts - spot.ts) as f64) / 1_000_000.0;
 
-                        if let Some(window) = windows.get_mut(market_id) {
-                            window.update(ret, DEFAULT_VOL, elapsed);
+                        // Unified log-normal model for all market types.
+                        // For UpDown: treats as Above(open_spot) — natural time decay.
+                        let p_hat = compute_p_hat_lognormal(
+                            tracker.current_price(),
+                            meta.market_type,
+                            open_spot,
+                            vol,
+                            tracker.drift_per_sec(),
+                            time_to_expiry,
+                        );
+                        let n_obs = tracker.valid_ticks;
 
-                            let sig = Signal {
-                                market_id: market_id.clone(),
-                                p_hat: window.p_hat(),
-                                confidence: window.confidence(),
-                                prior: 0.5,
-                                n_observations: window.n_observations(),
-                                ts: spot.ts,
-                            };
+                        let confidence = (p_hat - 0.5).abs() * 2.0;
 
-                            let _ = db_tx.try_send(DbEvent::Signal(sig.clone()));
-                            let _ = signal_tx.try_send(sig);
-                        }
+                        let sig = Signal {
+                            market_id: market_id.clone(),
+                            p_hat,
+                            confidence,
+                            prior: 0.5,
+                            n_observations: n_obs,
+                            ts: spot.ts,
+                        };
+
+                        let _ = db_tx.try_send(DbEvent::Signal(sig.clone()));
+                        let _ = signal_tx.try_send(sig);
                     }
                 }
-
             }
         }
     }

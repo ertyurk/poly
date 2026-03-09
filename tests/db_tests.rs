@@ -60,6 +60,7 @@ fn test_insert_decision_and_trade() {
         open_ts: 1000000,
         open_price: Some(85000.0),
         volume_24h: 50000.0,
+        market_type: MarketType::UpDown,
     };
     db::queries::insert_market(&conn, &ms).unwrap();
 
@@ -83,7 +84,9 @@ fn test_insert_decision_and_trade() {
         side: Side::Yes,
         entry_price: 0.50,
         size: 1000.0,
+        fee_rate: 0.015625,
         fee_paid: 30.0,
+        gross_pnl: 500.0,
         outcome: Outcome::Win,
         pnl: 470.0,
         bankroll_after: 100_470.0,

@@ -14,15 +14,20 @@ fn test_compute_edge_negative() {
 }
 
 #[test]
-fn test_fee_at_50_percent_15m() {
-    let fee = lookup_fee(0.50, Window::FifteenMin, &default_fee_schedule_15m());
-    assert!(fee > 0.03 && fee < 0.04);
+fn test_polymarket_fee_at_50_percent() {
+    // fee = 0.25 * (0.5 * 0.5)^2 = 0.25 * 0.0625 = 0.015625
+    let fee = polymarket_fee_rate(0.50);
+    assert!((fee - 0.015625).abs() < 1e-10);
 }
 
 #[test]
-fn test_fee_at_extremes_lower() {
-    let fee = lookup_fee(0.05, Window::FifteenMin, &default_fee_schedule_15m());
-    assert!(fee < 0.02);
+fn test_polymarket_fee_at_extremes() {
+    // At p=0.05: fee = 0.25 * (0.05*0.95)^2 = 0.25 * 0.002256 ≈ 0.000564
+    let fee = polymarket_fee_rate(0.05);
+    assert!(fee < 0.001);
+    // At p=0.95 should be symmetric
+    let fee95 = polymarket_fee_rate(0.95);
+    assert!((fee - fee95).abs() < 1e-10);
 }
 
 #[test]
@@ -64,7 +69,8 @@ fn test_stealth_cap_no_change() {
 #[test]
 fn test_decide_skip_low_confidence() {
     let result = decide(
-        0.65, 0.50, 0.01, 0.05, 100_000.0, 0.5, 100_000.0, 50_000.0, 0.02, 0.60, 0.30, "mkt-1",
+        0.65, 0.50, 0.01, 0.05, 100_000.0, 0.5, 100_000.0, 50_000.0, 0.02, 0.10, 0.60, 0.30,
+        "mkt-1",
     );
     assert!(result.is_err());
 }
@@ -72,7 +78,8 @@ fn test_decide_skip_low_confidence() {
 #[test]
 fn test_decide_trade_succeeds() {
     let result = decide(
-        0.65, 0.50, 0.01, 0.05, 100_000.0, 0.5, 100_000.0, 50_000.0, 0.02, 0.20, 0.30, "mkt-1",
+        0.65, 0.50, 0.01, 0.05, 100_000.0, 0.5, 100_000.0, 50_000.0, 0.02, 0.10, 0.20, 0.30,
+        "mkt-1",
     );
     assert!(result.is_ok());
     let dec = result.unwrap();

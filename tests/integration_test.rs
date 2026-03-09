@@ -1,4 +1,4 @@
-use polymarket_bot::actors::decision::decide;
+use polymarket_bot::actors::decision::{decide, polymarket_fee_rate};
 use polymarket_bot::actors::executor::{Executor, Mode};
 use polymarket_bot::actors::signal::MarketWindow;
 use polymarket_bot::types::*;
@@ -14,17 +14,20 @@ async fn test_full_pipeline_paper_trade() {
     let p_hat = window.p_hat();
     assert!(p_hat > 0.6, "expected p_hat > 0.6, got {p_hat}");
 
-    // 2. Run the decision engine
+    // 2. Run the decision engine with real Polymarket fee formula
+    let p_market = 0.50;
+    let fee_rate = polymarket_fee_rate(p_market);
     let result = decide(
         p_hat,
-        0.50,                // p_market
-        0.01,                // fee_rate
+        p_market,
+        fee_rate,
         0.05,                // tau_min
         100_000.0,           // b (LMSR liquidity)
         0.5,                 // kelly_fraction
         100_000.0,           // bankroll
         50_000.0,            // volume_24h
         0.02,                // max_volume_pct
+        0.10,                // max_bet_fraction
         0.10,                // min_confidence (low threshold)
         window.confidence(), // confidence
         "test-mkt",
@@ -35,7 +38,7 @@ async fn test_full_pipeline_paper_trade() {
     assert!(decision.size > 0.0, "expected positive size");
 
     // 3. Paper-execute the trade
-    let mut executor = Executor::new(Mode::Paper, 100_000.0, None);
+    let mut executor = Executor::new(Mode::Paper, 100_000.0, None, 0.50);
     let fill_id = executor.try_fill(&decision, 0.52, 0.48).await;
     assert!(fill_id.is_some(), "expected fill to succeed");
 
@@ -63,17 +66,20 @@ fn test_full_pipeline_skip_low_edge() {
 
     let p_hat = window.p_hat();
 
-    // High fee (15m mid-bucket: 3.15%) should swamp the tiny edge
+    // At p=0.50 the Polymarket fee is ~1.56%, which should swamp the tiny edge
+    let p_market = 0.50;
+    let fee_rate = polymarket_fee_rate(p_market);
     let result = decide(
         p_hat,
-        0.50,   // p_market
-        0.0315, // fee_rate (high 15m fee)
-        0.05,   // tau_min
+        p_market,
+        fee_rate,
+        0.05, // tau_min
         100_000.0,
         0.5,
         100_000.0,
         50_000.0,
         0.02,
+        0.10, // max_bet_fraction
         0.10,
         window.confidence(),
         "test-mkt-2",

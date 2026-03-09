@@ -129,18 +129,26 @@ pub struct ParsedBook {
 
 impl ParsedBook {
     pub fn from_response(resp: &OrderBookResponse) -> Self {
+        // CLOB API returns bids sorted ascending — best (highest) bid is last.
+        // Asks are sorted ascending — best (lowest) ask is first.
         let best_bid = resp
             .bids
             .as_ref()
-            .and_then(|b| b.first())
-            .and_then(|l| l.price.parse::<f64>().ok())
+            .and_then(|b| {
+                b.iter()
+                    .filter_map(|l| l.price.parse::<f64>().ok())
+                    .reduce(f64::max)
+            })
             .unwrap_or(0.0);
 
         let best_ask = resp
             .asks
             .as_ref()
-            .and_then(|a| a.first())
-            .and_then(|l| l.price.parse::<f64>().ok())
+            .and_then(|a| {
+                a.iter()
+                    .filter_map(|l| l.price.parse::<f64>().ok())
+                    .reduce(f64::min)
+            })
             .unwrap_or(1.0);
 
         let midpoint = f64::midpoint(best_bid, best_ask);

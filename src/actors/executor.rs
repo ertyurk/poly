@@ -30,6 +30,8 @@ pub struct Executor {
     client: Option<PolymarketClient>,
     /// Maps market_id → (token_yes, token_no)
     market_tokens: std::collections::HashMap<String, (String, String)>,
+    /// Maximum fraction of bankroll that can be committed across all open positions.
+    max_total_exposure: f64,
 }
 
 impl Executor {
@@ -37,7 +39,12 @@ impl Executor {
     ///
     /// In `Paper` mode, `client` can be `None` — fills are simulated locally.
     /// In `Live` mode, `client` must be `Some` with authenticated credentials.
-    pub fn new(mode: Mode, initial_bankroll: f64, client: Option<PolymarketClient>) -> Self {
+    pub fn new(
+        mode: Mode,
+        initial_bankroll: f64,
+        client: Option<PolymarketClient>,
+        max_total_exposure: f64,
+    ) -> Self {
         Self {
             mode,
             bankroll: initial_bankroll,
@@ -45,6 +52,7 @@ impl Executor {
             next_decision_id: 1,
             client,
             market_tokens: std::collections::HashMap::new(),
+            max_total_exposure,
         }
     }
 
@@ -80,20 +88,23 @@ impl Executor {
             return None;
         }
 
-        // Check available bankroll (bankroll minus committed capital)
+        // Check total exposure limit: committed capital can't exceed max_total_exposure
         let committed: f64 = self
             .positions
             .iter()
             .map(|p| p.size * p.entry_price)
             .sum();
-        let available = self.bankroll - committed;
+        let max_exposure = self.bankroll * self.max_total_exposure;
+        let available = (max_exposure - committed).max(0.0);
         let cost = dec.size * dec.price;
         if cost > available {
             tracing::debug!(
                 market_id = %dec.market_id,
                 cost = cost,
                 available = available,
-                "fill rejected: insufficient bankroll"
+                committed = committed,
+                max_exposure = max_exposure,
+                "fill rejected: exposure limit"
             );
             return None;
         }
@@ -130,7 +141,17 @@ impl Executor {
                 if let Some(ref client) = self.client {
                     if let Some(ref tid) = token_id {
                         let side_buy = dec.side == Side::Yes;
-                        let fee_bps = (dec.fee_rate * 10_000.0) as u64;
+                        let fee_bps = match client.fetch_fee_rate_bps(tid).await {
+                            Ok(bps) => bps,
+                            Err(e) => {
+                                tracing::warn!(
+                                    market_id = %dec.market_id,
+                                    error = %e,
+                                    "failed to fetch fee rate, using default 1000"
+                                );
+                                1000
+                            }
+                        };
                         match client
                             .place_order(tid, side_buy, fill_price, dec.size, fee_bps)
                             .await
@@ -221,7 +242,9 @@ impl Executor {
                 side: pos.side,
                 entry_price: pos.entry_price,
                 size: pos.size,
+                fee_rate: pos.fee_rate,
                 fee_paid,
+                gross_pnl,
                 outcome,
                 pnl,
                 bankroll_after: self.bankroll,

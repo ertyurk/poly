@@ -1,8 +1,9 @@
 use crate::math::{kelly, lmsr};
 use crate::types::*;
 
-/// Fallback fee rate (highest tier: 50/50 odds on 15m markets).
-const FALLBACK_FEE_RATE: f64 = 0.0315;
+/// Polymarket crypto fee rate parameter (same for all durations).
+/// fee_per_share = price * FEE_RATE * (price * (1 - price))^2
+const FEE_RATE: f64 = 0.25;
 
 /// Compute raw edge: p_hat - p_market.
 #[inline]
@@ -16,63 +17,15 @@ pub fn effective_edge(edge_abs: f64, fee_rate: f64) -> f64 {
     edge_abs - fee_rate
 }
 
-/// Hardcoded fee schedule for 15-minute resolution markets (Polymarket approximation).
-pub fn default_fee_schedule_15m() -> Vec<FeeScheduleEntry> {
-    vec![
-        FeeScheduleEntry {
-            prob_low: 0.00,
-            prob_high: 0.10,
-            fee_bps: 100.0,
-        },
-        FeeScheduleEntry {
-            prob_low: 0.10,
-            prob_high: 0.20,
-            fee_bps: 150.0,
-        },
-        FeeScheduleEntry {
-            prob_low: 0.20,
-            prob_high: 0.35,
-            fee_bps: 200.0,
-        },
-        FeeScheduleEntry {
-            prob_low: 0.35,
-            prob_high: 0.65,
-            fee_bps: 315.0,
-        },
-        FeeScheduleEntry {
-            prob_low: 0.65,
-            prob_high: 0.80,
-            fee_bps: 200.0,
-        },
-        FeeScheduleEntry {
-            prob_low: 0.80,
-            prob_high: 0.90,
-            fee_bps: 150.0,
-        },
-        FeeScheduleEntry {
-            prob_low: 0.90,
-            prob_high: 1.00,
-            fee_bps: 100.0,
-        },
-    ]
-}
-
-/// Look up fee rate (as a fraction, e.g. 0.0315) for a given probability and window.
-/// Falls back to the 0.35-0.65 bucket (highest fee) if no match is found.
+/// Polymarket fee rate as a fraction of notional (price * size).
+///
+/// Formula: `FEE_RATE * (p * (1 - p))^FEE_EXPONENT`
+/// At p=0.50 this is ~1.56%, dropping toward zero at extremes.
 #[inline]
-pub fn lookup_fee(p_market: f64, _window: Window, schedule: &[FeeScheduleEntry]) -> f64 {
-    for entry in schedule {
-        if p_market >= entry.prob_low && p_market < entry.prob_high {
-            return entry.fee_bps / 10_000.0;
-        }
-    }
-    // Edge case: p_market == 1.0 falls into the last bucket
-    if let Some(last) = schedule.last() {
-        if (p_market - last.prob_high).abs() < 1e-10 {
-            return last.fee_bps / 10_000.0;
-        }
-    }
-    FALLBACK_FEE_RATE
+pub fn polymarket_fee_rate(p: f64) -> f64 {
+    let p = p.clamp(0.0, 1.0);
+    let pq = p * (1.0 - p);
+    FEE_RATE * pq * pq
 }
 
 /// Entry gate: edge must exceed tau_min + effective_spread.
@@ -103,6 +56,7 @@ pub fn decide(
     bankroll: f64,
     volume_24h: f64,
     max_volume_pct: f64,
+    max_bet_fraction: f64,
     min_confidence: f64,
     confidence: f64,
     market_id: &str,
@@ -151,18 +105,22 @@ pub fn decide(
     let kelly_size = kelly::position_size(p_hat_eff, p_market_eff, kelly_fraction, bankroll);
     let mut size = lmsr_size.min(kelly_size);
 
-    // 8. Stealth cap
+    // 8. Bankroll hard cap
+    size = size.min(bankroll * max_bet_fraction);
+
+    // 9. Stealth cap
     size = apply_stealth_cap(size, volume_24h, max_volume_pct);
 
-    // 9. Final size check
-    if size <= 0.0 {
+    // 10. Polymarket minimum order size
+    const MIN_ORDER_SIZE: f64 = 5.0;
+    if size < MIN_ORDER_SIZE {
         return Err(no_trade(SkipReason::InsufficientEdge, eff_edge));
     }
 
-    // 10. Determine side
+    // 11. Determine side
     let side = if edge > 0.0 { Side::Yes } else { Side::No };
 
-    // 11. Return decision
+    // 12. Return decision
     Ok(TradeDecision {
         market_id: market_id.to_string(),
         side,
@@ -187,8 +145,6 @@ use tokio::sync::mpsc;
 pub enum DecisionInput {
     Signal(Signal),
     Market(MarketState),
-    #[allow(dead_code)]
-    Fee(FeeUpdate),
 }
 
 /// Messages the DecisionActor emits.
@@ -203,14 +159,13 @@ pub struct DecisionActor {
     tx: mpsc::Sender<DecisionOutput>,
     /// Cached latest market state per market_id.
     markets: std::collections::HashMap<String, MarketState>,
-    /// Cached fee schedule per window.
-    fee_schedules: std::collections::HashMap<Window, Vec<FeeScheduleEntry>>,
     /// Configuration
     tau_min: f64,
     b: f64,
     kelly_fraction: f64,
     bankroll: f64,
     max_volume_pct: f64,
+    max_bet_fraction: f64,
     min_confidence: f64,
 }
 
@@ -224,20 +179,19 @@ impl DecisionActor {
         kelly_fraction: f64,
         bankroll: f64,
         max_volume_pct: f64,
+        max_bet_fraction: f64,
         min_confidence: f64,
     ) -> Self {
-        let mut fee_schedules = std::collections::HashMap::new();
-        fee_schedules.insert(Window::FifteenMin, default_fee_schedule_15m());
         Self {
             rx,
             tx,
             markets: std::collections::HashMap::new(),
-            fee_schedules,
             tau_min,
             b,
             kelly_fraction,
             bankroll,
             max_volume_pct,
+            max_bet_fraction,
             min_confidence,
         }
     }
@@ -248,21 +202,12 @@ impl DecisionActor {
                 DecisionInput::Market(ms) => {
                     self.markets.insert(ms.market_id.clone(), ms);
                 }
-                DecisionInput::Fee(fu) => {
-                    self.fee_schedules.insert(fu.window, fu.schedule);
-                }
                 DecisionInput::Signal(sig) => {
                     let Some(ms) = self.markets.get(&sig.market_id) else {
                         continue;
                     };
 
-                    let schedule = self
-                        .fee_schedules
-                        .get(&ms.window)
-                        .cloned()
-                        .unwrap_or_else(default_fee_schedule_15m);
-
-                    let fee_rate = lookup_fee(ms.midpoint, ms.window, &schedule);
+                    let fee_rate = polymarket_fee_rate(ms.midpoint);
 
                     let result = decide(
                         sig.p_hat,
@@ -274,6 +219,7 @@ impl DecisionActor {
                         self.bankroll,
                         ms.volume_24h,
                         self.max_volume_pct,
+                        self.max_bet_fraction,
                         self.min_confidence,
                         sig.confidence,
                         &sig.market_id,

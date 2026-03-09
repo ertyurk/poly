@@ -21,12 +21,12 @@ initial = 100.0
 # A higher value means fewer but higher-conviction trades.
 # edge must exceed tau_min + effective_spread to pass the entry gate.
 # Set low (0.02) for paper trading to see more activity; increase for live.
-tau_min = 0.02
+tau_min = 0.05
 
 # Fraction of full Kelly criterion to use for position sizing.
-# 0.5 = half-Kelly (recommended to reduce variance vs full Kelly).
+# 0.25 = quarter-Kelly (conservative, lower variance).
 # Range: 0.0–1.0. Lower = more conservative.
-kelly_fraction = 0.5
+kelly_fraction = 0.25
 
 # Maximum order size as a fraction of 24h market volume (stealth cap).
 # Prevents the bot from moving the market. 0.02 = 2% of daily volume.
@@ -36,12 +36,22 @@ max_volume_pct = 0.02
 # Filters out signals where the model is unsure.
 # 0.20 = need p_hat ≥ 0.60 or ≤ 0.40 (paper trading, more active).
 # 0.60 = need p_hat ≥ 0.80 or ≤ 0.20 (conservative, fewer trades).
-min_confidence = 0.20
+min_confidence = 0.25
 
 # LMSR liquidity parameter (b). Controls price sensitivity to quantity changes.
 # Higher b = more liquidity = tighter spread = smaller price impact per trade.
 # Polymarket typically uses b in the 50k–200k range for crypto markets.
 liquidity_b = 100000.0
+
+# Hard cap: maximum fraction of bankroll risked per single trade.
+# 0.10 = no trade can exceed 10% of current bankroll.
+# Prevents catastrophic loss from a single bad bet.
+max_bet_fraction = 0.10
+
+# Maximum fraction of bankroll committed across ALL open positions.
+# 0.50 = max 50% of bankroll at risk simultaneously.
+# Prevents over-commitment when many markets are discovered at once.
+max_total_exposure = 0.50
 
 [strategy.decay]
 # Exponential decay rates (lambda) for each signal source.
@@ -91,10 +101,6 @@ gamma_url = "https://gamma-api.polymarket.com"
 # How often (seconds) to poll Gamma API for new/updated markets.
 poll_interval_secs = 30
 
-# How often (seconds) to refresh the fee schedule from Polymarket.
-# Polymarket introduced dynamic taker fees in Jan 2026, varying by probability bucket
-# and market window (e.g., ~3.15% at 50/50 odds on 15m markets).
-fee_refresh_secs = 60
 
 [writer]
 # SQLite writer batching: accumulate this many events before flushing to disk.

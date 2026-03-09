@@ -3,7 +3,7 @@ use polymarket_bot::types::*;
 
 #[tokio::test]
 async fn test_executor_fill_win() {
-    let mut exec = Executor::new(Mode::Paper, 100_000.0, None);
+    let mut exec = Executor::new(Mode::Paper, 100_000.0, None, 0.50);
     let dec = TradeDecision {
         market_id: "mkt-1".into(),
         side: Side::Yes,
@@ -22,7 +22,7 @@ async fn test_executor_fill_win() {
 
 #[tokio::test]
 async fn test_executor_fill_rejected_price_slipped() {
-    let mut exec = Executor::new(Mode::Paper, 100_000.0, None);
+    let mut exec = Executor::new(Mode::Paper, 100_000.0, None, 0.50);
     let dec = TradeDecision {
         market_id: "mkt-1".into(),
         side: Side::Yes,
@@ -40,7 +40,7 @@ async fn test_executor_fill_rejected_price_slipped() {
 
 #[tokio::test]
 async fn test_executor_settle_win() {
-    let mut exec = Executor::new(Mode::Paper, 100_000.0, None);
+    let mut exec = Executor::new(Mode::Paper, 100_000.0, None, 0.50);
     let dec = TradeDecision {
         market_id: "mkt-1".into(),
         side: Side::Yes,
@@ -62,7 +62,7 @@ async fn test_executor_settle_win() {
 
 #[tokio::test]
 async fn test_executor_settle_loss() {
-    let mut exec = Executor::new(Mode::Paper, 100_000.0, None);
+    let mut exec = Executor::new(Mode::Paper, 100_000.0, None, 0.50);
     let dec = TradeDecision {
         market_id: "mkt-1".into(),
         side: Side::Yes,

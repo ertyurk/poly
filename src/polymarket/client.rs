@@ -67,6 +67,11 @@ impl PolymarketClient {
 
     /// Fetch active crypto price prediction markets from the Gamma Events API.
     /// Returns flattened markets from all matching events.
+    ///
+    /// Two strategies:
+    /// 1. Volume-sorted query for established daily/weekly crypto markets.
+    /// 2. Deterministic slug-based lookups for short-term Up/Down markets
+    ///    (5m, 15m, 4h) which never rank high enough by volume.
     pub async fn fetch_markets(
         &self,
     ) -> Result<Vec<GammaMarket>, Box<dyn std::error::Error + Send + Sync>> {
@@ -75,17 +80,105 @@ impl PolymarketClient {
             self.gamma_url
         );
         let resp = self.http.get(&url).send().await?;
+        let mut markets = Self::parse_event_response(resp).await?;
+
+        // Fetch short-term up/down markets by computed slug
+        let updown = self.fetch_updown_markets().await;
+        if !updown.is_empty() {
+            let seen: std::collections::HashSet<String> = markets
+                .iter()
+                .filter_map(|m| m.condition_id.clone())
+                .collect();
+            let new_count = updown
+                .iter()
+                .filter(|m| {
+                    m.condition_id
+                        .as_deref()
+                        .map_or(false, |id| !seen.contains(id))
+                })
+                .count();
+            if new_count > 0 {
+                tracing::info!(count = new_count, "discovered up/down markets via slug lookup");
+            }
+            markets.extend(updown.into_iter().filter(|m| {
+                m.condition_id
+                    .as_deref()
+                    .map_or(true, |id| !seen.contains(id))
+            }));
+        }
+
+        Ok(markets)
+    }
+
+    /// Fetch short-term up/down markets by computing expected event slugs.
+    ///
+    /// Slug pattern: `{asset}-updown-{window}-{start_ts}`
+    /// where start_ts is aligned to window boundaries (300s/900s/14400s).
+    async fn fetch_updown_markets(&self) -> Vec<GammaMarket> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        const ASSETS: &[&str] = &["btc", "eth"];
+        // (slug label, alignment in seconds, how many windows ahead to fetch)
+        const WINDOWS: &[(&str, i64, i64)] = &[
+            ("5m", 300, 3),
+            ("15m", 900, 3),
+            ("4h", 14400, 2),
+        ];
+
+        let mut slugs = Vec::new();
+        for asset in ASSETS {
+            for &(label, align, ahead) in WINDOWS {
+                let current = (now / align) * align;
+                // Start from -1 to include the previous window (may still be resolving)
+                for i in -1..ahead {
+                    slugs.push(format!("{asset}-updown-{label}-{}", current + i * align));
+                }
+            }
+        }
+
+        // Fetch all slugs concurrently
+        let futs: Vec<_> = slugs
+            .iter()
+            .map(|slug| {
+                let url = format!("{}/events?slug={slug}", self.gamma_url);
+                self.http.get(&url).send()
+            })
+            .collect();
+        let results = futures_util::future::join_all(futs).await;
+
+        let mut markets = Vec::new();
+        for (i, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(resp) => match Self::parse_event_response(resp).await {
+                    Ok(m) => markets.extend(m),
+                    Err(e) => {
+                        tracing::debug!(slug = %slugs[i], error = %e, "slug lookup failed");
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!(slug = %slugs[i], error = %e, "slug request failed");
+                }
+            }
+        }
+        markets
+    }
+
+    async fn parse_event_response(
+        resp: reqwest::Response,
+    ) -> Result<Vec<GammaMarket>, Box<dyn std::error::Error + Send + Sync>> {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(format!("Gamma API {status}: {body}").into());
         }
         let events: Vec<GammaEvent> = resp.json().await?;
-        let markets: Vec<GammaMarket> = events
+        Ok(events
             .into_iter()
             .flat_map(|e| e.markets.unwrap_or_default())
-            .collect();
-        Ok(markets)
+            .collect())
     }
 
     /// Fetch a specific market by condition ID to check resolution status.
@@ -135,6 +228,27 @@ impl PolymarketClient {
         }
         let mid: MidpointResponse = resp.json().await?;
         Ok(mid.mid.and_then(|m| m.parse::<f64>().ok()).unwrap_or(0.5))
+    }
+
+    /// Fetch the raw `feeRateBps` for a token from the CLOB API.
+    /// This is the opaque value required for order signing (typically 1000 for crypto).
+    pub async fn fetch_fee_rate_bps(
+        &self,
+        token_id: &str,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!("{}/fee-rate?token_id={token_id}", self.clob_url);
+        let resp = self.http.get(&url).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("CLOB fee-rate {status}: {body}").into());
+        }
+        #[derive(serde::Deserialize)]
+        struct FeeRateResp {
+            base_fee: u64,
+        }
+        let fr: FeeRateResp = resp.json().await?;
+        Ok(fr.base_fee)
     }
 
     // -----------------------------------------------------------------------

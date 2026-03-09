@@ -28,6 +28,7 @@ struct TrackedMarket {
     open_ts: TsMicros,
     open_price: Option<f64>,
     volume_24h: f64,
+    market_type: MarketType,
     resolved: bool,
 }
 
@@ -106,6 +107,7 @@ impl MarketFetcher {
         let now = now_micros();
 
         for gm in &markets {
+            let question = gm.question.as_deref().unwrap_or("?");
             let condition_id = match gm.condition_id.as_deref() {
                 Some(id) if !id.is_empty() => id,
                 _ => continue,
@@ -131,11 +133,13 @@ impl MarketFetcher {
 
             // Determine window from end_date
             let Some(resolution_ts) = parse_end_date(gm) else {
+                tracing::debug!(question, "skipped: no end_date");
                 continue;
             };
             let secs_until = (resolution_ts - now) / 1_000_000;
             if secs_until < 60 {
-                continue; // Skip markets resolving in < 1 minute
+                tracing::debug!(question, secs_until, "skipped: resolves too soon");
+                continue;
             }
             // Skip markets resolving more than 48 hours out — our short-term
             // Binance signal has no predictive power for weekly/monthly/yearly markets.
@@ -150,6 +154,7 @@ impl MarketFetcher {
             // Extract tokens (handles both tokens array and clobTokenIds string)
             let (token_yes, token_no) = extract_market_tokens(gm);
             if token_yes.is_empty() || token_no.is_empty() {
+                tracing::debug!(question, "skipped: no tokens");
                 continue;
             }
 
@@ -157,17 +162,22 @@ impl MarketFetcher {
             let book = match self.client.fetch_order_book(&token_yes).await {
                 Ok(b) => ParsedBook::from_response(&b),
                 Err(e) => {
-                    tracing::debug!(error = %e, "failed to fetch book for {condition_id}");
+                    tracing::debug!(question, error = %e, "skipped: book fetch failed");
                     continue;
                 }
             };
 
             // Skip illiquid markets (spread > 10% or no real order book)
-            if book.spread > 0.10 || (book.best_bid < f64::EPSILON && book.best_ask > 1.0 - f64::EPSILON) {
+            if book.spread > 0.10
+                || (book.best_bid < f64::EPSILON
+                    && book.best_ask > 1.0 - f64::EPSILON)
+            {
                 tracing::debug!(
-                    condition_id,
+                    question,
                     spread = book.spread,
-                    "skipping illiquid market"
+                    bid = book.best_bid,
+                    ask = book.best_ask,
+                    "skipped: illiquid"
                 );
                 continue;
             }
@@ -176,7 +186,10 @@ impl MarketFetcher {
                 .volume
                 .as_deref()
                 .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(10_000.0);
+                .unwrap_or(0.0)
+                // Fresh up/down markets often have 0 volume; use a floor so the
+                // stealth cap doesn't zero out every trade on new markets.
+                .max(10_000.0);
 
             // Get open price from tokens array or outcomePrices
             let open_price = gm
@@ -196,6 +209,19 @@ impl MarketFetcher {
                         .and_then(|v| v.first().and_then(|p| p.parse::<f64>().ok()))
                 });
 
+            let market_type = parse_market_type(question);
+
+            // Only trade UpDown markets — our signal model is tuned for directional bets.
+            // "Above $X" / "Between" markets need a different edge source.
+            if !matches!(market_type, MarketType::UpDown) {
+                continue;
+            }
+
+            // Skip UpDown markets resolving > 5 hours out (focus on 5m/15m/1h/4h)
+            if secs_until > 5 * 3600 {
+                continue;
+            }
+
             let market_id = format!(
                 "{asset}_{window}_{cid}",
                 cid = &condition_id[..condition_id.len().min(8)]
@@ -214,6 +240,7 @@ impl MarketFetcher {
                 open_ts: now,
                 open_price,
                 volume_24h: volume,
+                market_type,
             };
 
             let _ = market_tx_signal.send(ms.clone()).await;
@@ -232,6 +259,7 @@ impl MarketFetcher {
                     open_ts: now,
                     open_price,
                     volume_24h: volume,
+                    market_type,
                     resolved: false,
                 },
             );
@@ -274,6 +302,7 @@ impl MarketFetcher {
                 open_ts: tm.open_ts,
                 open_price: tm.open_price,
                 volume_24h: tm.volume_24h,
+                market_type: tm.market_type,
             };
 
             let _ = market_tx_decision.send(ms).await;
@@ -448,6 +477,75 @@ fn extract_market_tokens(gm: &crate::polymarket::types::GammaMarket) -> (String,
     }
 
     (String::new(), String::new())
+}
+
+/// Parse market type from question text to determine what p_hat should represent.
+///
+/// Examples:
+///   "Will the price of Bitcoin be above $78,000 on March 9?" → Above(78000)
+///   "Will the price of Bitcoin be greater than $78,000..." → Above(78000)
+///   "Will the price of Bitcoin be less than $60,000..." → Below(60000)
+///   "Will the price of Bitcoin be between $68,000 and $70,000..." → Between(68000, 70000)
+///   "Bitcoin Up or Down on March 9?" → UpDown
+fn parse_market_type(question: &str) -> MarketType {
+    let lower = question.to_lowercase();
+
+    if lower.contains("up or down") {
+        return MarketType::UpDown;
+    }
+
+    if lower.contains("between") {
+        let amounts = extract_dollar_amounts(question);
+        if amounts.len() >= 2 {
+            let lo = amounts[0].min(amounts[1]);
+            let hi = amounts[0].max(amounts[1]);
+            return MarketType::Between(lo, hi);
+        }
+    }
+
+    if lower.contains("above") || lower.contains("greater than") {
+        let amounts = extract_dollar_amounts(question);
+        if let Some(&strike) = amounts.first() {
+            return MarketType::Above(strike);
+        }
+    }
+
+    if lower.contains("less than") || lower.contains("below") {
+        let amounts = extract_dollar_amounts(question);
+        if let Some(&strike) = amounts.first() {
+            return MarketType::Below(strike);
+        }
+    }
+
+    // Fallback: treat as UpDown (safest default)
+    MarketType::UpDown
+}
+
+/// Extract dollar amounts from text. E.g., "$78,000" → 78000.0
+fn extract_dollar_amounts(text: &str) -> Vec<f64> {
+    let mut amounts = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' {
+            i += 1;
+            let mut num_str = String::new();
+            while i < chars.len()
+                && (chars[i].is_ascii_digit() || chars[i] == ',' || chars[i] == '.')
+            {
+                if chars[i] != ',' {
+                    num_str.push(chars[i]);
+                }
+                i += 1;
+            }
+            if let Ok(val) = num_str.parse::<f64>() {
+                amounts.push(val);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    amounts
 }
 
 fn determine_outcome(gm: &crate::polymarket::types::GammaMarket) -> Side {

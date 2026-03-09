@@ -31,6 +31,12 @@ pub struct Strategy {
     pub max_volume_pct: f64,
     pub min_confidence: f64,
     pub liquidity_b: f64,
+    /// Maximum fraction of bankroll risked per trade (hard cap).
+    /// 0.10 = max 10% of bankroll per position.
+    pub max_bet_fraction: f64,
+    /// Maximum fraction of bankroll committed across ALL open positions.
+    /// 0.50 = max 50% of bankroll at risk at any time.
+    pub max_total_exposure: f64,
     pub decay: Decay,
 }
 
@@ -59,7 +65,6 @@ pub struct Polymarket {
     pub ws_url: String,
     pub gamma_url: String,
     pub poll_interval_secs: u64,
-    pub fee_refresh_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
