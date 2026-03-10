@@ -3,4 +3,5 @@
 data/bot.db
 data/bot.db-wal
 data/bot.db-shm
+data/bot.db.paper
 .env

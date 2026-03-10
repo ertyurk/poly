@@ -94,14 +94,19 @@ See `.env.example` for a template.
 
 ### Live trading setup
 
+See [`docs/live-trading-setup.md`](docs/live-trading-setup.md) for the full step-by-step guide (API keys, wallet private key, EIP-712 signing, Telegram).
+
+Quick version:
 1. Copy `.env.example` to `.env`
-2. Fill in your Polymarket API credentials
+2. Fill in your Polymarket API credentials + private key
 3. Run without `--paper-trade`:
    ```bash
    cargo run -- --asset btc --bankroll 1000
    ```
 
 ## How it works
+
+See [`docs/architecture.md`](docs/architecture.md) for the full system design, signal model math, decision pipeline, and data flow.
 
 ```
 Binance WS ──► Ingest ──► Signal Engine ──► Decision Engine ──► Executor
@@ -226,8 +231,9 @@ polymarket-bot/
 │       ├── schema.rs          # Table creation + migrations
 │       └── queries.rs         # Insert/update/restore helpers
 └── docs/
-    ├── dashboard-queries.md
-    └── plans/
+    ├── architecture.md
+    ├── live-trading-setup.md
+    └── dashboard-queries.md
 ```
 
 ## Telegram notifications

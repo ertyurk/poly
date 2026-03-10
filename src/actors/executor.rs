@@ -241,6 +241,9 @@ impl Executor {
                                     tracing::warn!(
                                         market_id = %dec.market_id,
                                         error = resp.error_msg.as_deref().unwrap_or("unknown"),
+                                        side = %dec.side,
+                                        size = dec.size,
+                                        price = fill_price,
                                         "order rejected"
                                     );
                                     return None;

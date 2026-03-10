@@ -364,7 +364,15 @@ impl PolymarketClient {
         }
 
         let resp = req.send().await?;
-        let order_resp: OrderResponse = resp.json().await?;
+        let status = resp.status();
+        let body_text = resp.text().await?;
+
+        if !status.is_success() {
+            return Err(format!("CLOB API {status}: {body_text}").into());
+        }
+
+        let order_resp: OrderResponse = serde_json::from_str(&body_text)
+            .map_err(|e| format!("bad order response: {e} — body: {body_text}"))?;
         Ok(order_resp)
     }
 }
