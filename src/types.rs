@@ -203,6 +203,8 @@ pub struct TradeResult {
     pub bankroll_after: f64,
     pub entry_ts: TsMicros,
     pub resolved_ts: TsMicros,
+    /// Estimated slippage applied in paper mode (0.0 in live mode).
+    pub estimated_slippage: f64,
 }
 
 /// Command to settle a resolved market.
@@ -238,5 +240,14 @@ pub enum DbEvent {
     ConfigSnapshot {
         config_json: String,
         ts: TsMicros,
+    },
+    SaveSignalState {
+        asset: String,
+        last_price: f64,
+        last_ts: TsMicros,
+        valid_ticks: u32,
+        variance: f64,
+        drift: f64,
+        lambda: f64,
     },
 }

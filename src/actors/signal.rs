@@ -91,20 +91,20 @@ fn compute_p_hat_lognormal(
 // AssetTracker — estimates realized vol and drift from tick stream
 // ---------------------------------------------------------------------------
 
-struct AssetTracker {
-    last_price: f64,
-    last_ts: TsMicros,
+pub struct AssetTracker {
+    pub last_price: f64,
+    pub last_ts: TsMicros,
     /// Count of valid updates (spaced ≥ 0.1s apart) — NOT raw ticks.
-    valid_ticks: u32,
+    pub valid_ticks: u32,
     /// Exponentially-weighted per-second variance estimate.
-    variance: f64,
+    pub variance: f64,
     /// Exponentially-weighted per-second drift estimate.
-    drift: f64,
-    lambda: f64,
+    pub drift: f64,
+    pub lambda: f64,
 }
 
 impl AssetTracker {
-    fn new(lambda: f64) -> Self {
+    pub fn new(lambda: f64) -> Self {
         Self {
             last_price: 0.0,
             last_ts: 0,
@@ -154,6 +154,25 @@ impl AssetTracker {
 
     fn current_price(&self) -> f64 {
         self.last_price
+    }
+
+    /// Restore state from a previous session to avoid cold-start warm-up.
+    pub fn restore(
+        last_price: f64,
+        last_ts: TsMicros,
+        valid_ticks: u32,
+        variance: f64,
+        drift: f64,
+        lambda: f64,
+    ) -> Self {
+        Self {
+            last_price,
+            last_ts,
+            valid_ticks,
+            variance,
+            drift,
+            lambda,
+        }
     }
 }
 
@@ -245,11 +264,21 @@ struct MarketMeta {
 
 pub struct SignalActor {
     config: Config,
+    initial_trackers: HashMap<Asset, AssetTracker>,
 }
 
 impl SignalActor {
-    pub const fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            initial_trackers: HashMap::new(),
+        }
+    }
+
+    /// Pre-load warm-up state from a previous session.
+    pub fn with_warm_state(mut self, trackers: HashMap<Asset, AssetTracker>) -> Self {
+        self.initial_trackers = trackers;
+        self
     }
 
     pub async fn run(
@@ -262,8 +291,25 @@ impl SignalActor {
     ) {
         let lambda = self.config.strategy.decay.spot_lambda;
 
-        // Per-asset volatility & drift tracking
+        // Per-asset volatility & drift tracking — seed from warm-up state if available
         let mut asset_trackers: HashMap<Asset, AssetTracker> = HashMap::new();
+        for (asset, tracker) in &self.initial_trackers {
+            let restored = AssetTracker::restore(
+                tracker.last_price,
+                tracker.last_ts,
+                tracker.valid_ticks,
+                tracker.variance,
+                tracker.drift,
+                tracker.lambda,
+            );
+            tracing::info!(
+                asset = %asset,
+                valid_ticks = tracker.valid_ticks,
+                vol = tracker.variance.sqrt(),
+                "restored signal state from previous session"
+            );
+            asset_trackers.insert(*asset, restored);
+        }
         // Per-market metadata
         let mut market_meta: HashMap<String, MarketMeta> = HashMap::new();
         // Per-market spot open prices (first spot price seen after market discovery)
@@ -276,7 +322,20 @@ impl SignalActor {
                 biased;
 
                 _ = shutdown.changed() => {
-                    tracing::info!("signal actor shutting down");
+                    tracing::info!("signal actor shutting down — persisting state");
+                    for (asset, tracker) in &asset_trackers {
+                        if tracker.valid_ticks > 0 {
+                            let _ = db_tx.try_send(DbEvent::SaveSignalState {
+                                asset: asset.to_string(),
+                                last_price: tracker.last_price,
+                                last_ts: tracker.last_ts,
+                                valid_ticks: tracker.valid_ticks,
+                                variance: tracker.variance,
+                                drift: tracker.drift,
+                                lambda: tracker.lambda,
+                            });
+                        }
+                    }
                     return;
                 }
 

@@ -109,6 +109,26 @@ impl WriterActor {
                 DbEvent::ConfigSnapshot { config_json, ts } => {
                     db::queries::insert_config_snapshot(&tx, config_json, *ts)?;
                 }
+                DbEvent::SaveSignalState {
+                    asset,
+                    last_price,
+                    last_ts,
+                    valid_ticks,
+                    variance,
+                    drift,
+                    lambda,
+                } => {
+                    let state = db::queries::SavedSignalState {
+                        asset: asset.clone(),
+                        last_price: *last_price,
+                        last_ts: *last_ts,
+                        valid_ticks: *valid_ticks,
+                        variance: *variance,
+                        drift: *drift,
+                        lambda: *lambda,
+                    };
+                    db::queries::save_signal_state(&tx, &state, crate::types::now_micros())?;
+                }
             }
         }
         tx.commit()

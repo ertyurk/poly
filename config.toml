@@ -110,3 +110,13 @@ batch_size = 100
 # Maximum time (milliseconds) between flushes, even if batch_size isn't reached.
 # Ensures data lands on disk promptly during low-activity periods.
 flush_interval_ms = 500
+
+# [telegram]
+# # Telegram Bot API token (from @BotFather).
+# bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+# # Your Telegram chat ID (send /start to @userinfobot to get it).
+# chat_id = "123456789"
+# # Enable/disable Telegram alerts.
+# enabled = true
+# # Send periodic P&L summary every N minutes (default: 30).
+# summary_interval_mins = 30

@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl REAL NOT NULL,
     bankroll_after REAL NOT NULL,
     entry_ts INTEGER NOT NULL,
-    resolved_ts INTEGER NOT NULL
+    resolved_ts INTEGER NOT NULL,
+    estimated_slippage REAL NOT NULL DEFAULT 0.0
 );
 CREATE INDEX IF NOT EXISTS idx_trades_outcome ON trades(outcome);
 CREATE INDEX IF NOT EXISTS idx_trades_resolved ON trades(resolved_ts);
@@ -83,4 +84,16 @@ CREATE TABLE IF NOT EXISTS config_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     config_json TEXT NOT NULL,
     ts INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS signal_state (
+    asset TEXT NOT NULL,
+    last_price REAL NOT NULL,
+    last_ts INTEGER NOT NULL,
+    valid_ticks INTEGER NOT NULL,
+    variance REAL NOT NULL,
+    drift REAL NOT NULL,
+    lambda REAL NOT NULL,
+    saved_at INTEGER NOT NULL,
+    PRIMARY KEY (asset)
 );
