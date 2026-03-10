@@ -155,8 +155,10 @@ impl Executor {
 
         match self.mode {
             Mode::Paper => {
-                // Apply slippage: buying pushes price up, selling pushes price down
-                fill_price = (fill_price + slippage).clamp(0.01, 0.99);
+                // Apply slippage: buying pushes price up
+                // Clamp to at most 5 cents above the original price to avoid
+                // unrealistic fills near 1.0 (which leave no upside).
+                fill_price = (fill_price + slippage).min(fill_price + 0.05).clamp(0.01, 0.95);
                 tracing::info!(
                     market_id = %dec.market_id,
                     side = %dec.side,

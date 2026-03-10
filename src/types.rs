@@ -248,6 +248,7 @@ pub enum DbEvent {
         valid_ticks: u32,
         variance: f64,
         drift: f64,
+        slow_drift: f64,
         lambda: f64,
     },
 }

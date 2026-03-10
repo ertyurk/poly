@@ -116,6 +116,7 @@ impl WriterActor {
                     valid_ticks,
                     variance,
                     drift,
+                    slow_drift,
                     lambda,
                 } => {
                     let state = db::queries::SavedSignalState {
@@ -125,6 +126,7 @@ impl WriterActor {
                         valid_ticks: *valid_ticks,
                         variance: *variance,
                         drift: *drift,
+                        slow_drift: *slow_drift,
                         lambda: *lambda,
                     };
                     db::queries::save_signal_state(&tx, &state, crate::types::now_micros())?;

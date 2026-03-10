@@ -165,6 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.valid_ticks,
                     s.variance,
                     s.drift,
+                    s.slow_drift,
                     s.lambda,
                 ),
             );
@@ -253,33 +254,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    // Telegram alert actor (optional — only spawned if configured)
-    let tg_stats: Arc<TelegramStats> = Arc::new(TelegramStats::new(bankroll));
-    let telegram_tx: Option<mpsc::Sender<TelegramAlert>> = if let Some(ref tg) = config.telegram {
-        if tg.enabled {
-            let (tg_tx, tg_rx) = mpsc::channel::<TelegramAlert>(100);
-            let actor = TelegramActor::new(
-                tg.bot_token.clone(),
-                tg.chat_id.clone(),
-                tg.summary_interval_mins,
-                Arc::clone(&tg_stats),
-            );
-            let tg_shutdown = shutdown_rx.clone();
-            tokio::spawn(async move {
-                actor.run(tg_rx, tg_shutdown).await;
-            });
-            tracing::info!(
-                summary_interval_mins = tg.summary_interval_mins,
-                "telegram alerts enabled with periodic summary"
-            );
-            Some(tg_tx)
+    // Telegram alert actor (optional — only spawned if configured and enabled)
+    let (telegram_tx, tg_stats): (Option<mpsc::Sender<TelegramAlert>>, Option<Arc<TelegramStats>>) =
+        if let Some(ref tg) = config.telegram {
+            if tg.enabled {
+                let stats = Arc::new(TelegramStats::new(bankroll));
+                let (tg_tx, tg_rx) = mpsc::channel::<TelegramAlert>(100);
+                let actor = TelegramActor::new(
+                    tg.bot_token.clone(),
+                    tg.chat_id.clone(),
+                    tg.summary_interval_mins,
+                    Arc::clone(&stats),
+                );
+                let tg_shutdown = shutdown_rx.clone();
+                tokio::spawn(async move {
+                    actor.run(tg_rx, tg_shutdown).await;
+                });
+                tracing::info!(
+                    summary_interval_mins = tg.summary_interval_mins,
+                    "telegram alerts enabled with periodic summary"
+                );
+                (Some(tg_tx), Some(stats))
+            } else {
+                (None, None)
+            }
         } else {
-            None
-        }
-    } else {
-        None
-    };
-    let exec_tg_stats = Arc::clone(&tg_stats);
+            (None, None)
+        };
+    let exec_tg_stats = tg_stats.clone();
 
     // Executor task — handles fills + settlements, returns stats
     let exec_db_tx = db_tx.clone();
@@ -313,7 +315,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let best_bid = dec.price;
                             if executor.try_fill(&dec, best_ask, best_bid).await.is_some() {
                                 trades_placed += 1;
-                                exec_tg_stats.record_fill();
+                                if let Some(ref stats) = exec_tg_stats {
+                                    stats.record_fill();
+                                }
                                 if let Some(ref tg) = telegram_tx {
                                     let _ = tg.try_send(TelegramAlert::TradeFilled(dec.clone()));
                                 }
@@ -350,7 +354,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "settled"
                             );
 
-                            exec_tg_stats.record_settlement(tr).await;
+                            if let Some(ref stats) = exec_tg_stats {
+                                stats.record_settlement(tr).await;
+                            }
                             if let Some(ref tg) = telegram_tx {
                                 let _ = tg.try_send(TelegramAlert::TradeSettled(tr.clone()));
                             }

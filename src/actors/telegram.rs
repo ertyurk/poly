@@ -1,9 +1,12 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{self, Duration};
+use tokio::time::{self, Duration, Instant};
 
 use crate::types::*;
+
+/// Minimum interval between individual alert messages (rate limiting).
+const MIN_ALERT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Messages the Telegram actor can receive.
 #[derive(Debug, Clone)]
@@ -138,6 +141,7 @@ impl TelegramActor {
         let mut summary_tick = time::interval(self.summary_interval);
         // Skip the first immediate tick
         summary_tick.tick().await;
+        let mut last_alert = Instant::now() - MIN_ALERT_INTERVAL;
 
         loop {
             tokio::select! {
@@ -154,10 +158,16 @@ impl TelegramActor {
                 msg = rx.recv() => {
                     match msg {
                         Some(alert) => {
+                            // Rate-limit individual alerts to avoid hitting Telegram limits
+                            let elapsed = last_alert.elapsed();
+                            if elapsed < MIN_ALERT_INTERVAL {
+                                time::sleep(MIN_ALERT_INTERVAL - elapsed).await;
+                            }
                             let text = format_alert(&alert);
                             if let Err(e) = self.send_message(&text).await {
                                 tracing::warn!(error = %e, "failed to send telegram alert");
                             }
+                            last_alert = Instant::now();
                         }
                         None => break,
                     }
@@ -200,13 +210,14 @@ impl TelegramActor {
         )
     }
 
-    async fn send_message(&self, text: &str) -> Result<(), reqwest::Error> {
+    async fn send_message(&self, text: &str) -> Result<(), String> {
         let url = format!(
             "https://api.telegram.org/bot{}/sendMessage",
             self.bot_token
         );
 
-        self.client
+        let resp = self
+            .client
             .post(&url)
             .json(&serde_json::json!({
                 "chat_id": self.chat_id,
@@ -215,7 +226,27 @@ impl TelegramActor {
                 "disable_web_page_preview": true,
             }))
             .send()
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("telegram API {status}: {body}"));
+        }
+
+        // Check Telegram API-level ok field
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("bad json: {e}"))?;
+        if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let desc = body
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            return Err(format!("telegram API error: {desc}"));
+        }
 
         Ok(())
     }

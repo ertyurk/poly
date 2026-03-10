@@ -21,7 +21,7 @@ initial = 100.0
 # A higher value means fewer but higher-conviction trades.
 # edge must exceed tau_min + effective_spread to pass the entry gate.
 # Set low (0.02) for paper trading to see more activity; increase for live.
-tau_min = 0.05
+tau_min = 0.02
 
 # Fraction of full Kelly criterion to use for position sizing.
 # 0.25 = quarter-Kelly (conservative, lower variance).
@@ -36,7 +36,7 @@ max_volume_pct = 0.02
 # Filters out signals where the model is unsure.
 # 0.20 = need p_hat ≥ 0.60 or ≤ 0.40 (paper trading, more active).
 # 0.60 = need p_hat ≥ 0.80 or ≤ 0.20 (conservative, fewer trades).
-min_confidence = 0.25
+min_confidence = 0.40
 
 # LMSR liquidity parameter (b). Controls price sensitivity to quantity changes.
 # Higher b = more liquidity = tighter spread = smaller price impact per trade.

@@ -82,13 +82,21 @@ pub fn decide(
         return Err(no_trade(SkipReason::LowConfidence, 0.0));
     }
 
-    // 3. Effective edge
+    // 3. Only trade when market is near 50/50 (between 0.35 and 0.65).
+    // Extreme market prices mean: (a) the market already agrees with us
+    // (no edge), or (b) our reference data disagrees (bad open_spot).
+    // Near 50/50, risk/reward is symmetric and edge is most exploitable.
+    if p_market < 0.35 || p_market > 0.65 {
+        return Err(no_trade(SkipReason::InsufficientEdge, 0.0));
+    }
+
+    // 4. Effective edge
     let eff_edge = effective_edge(edge_abs, fee_rate);
     if eff_edge <= 0.0 {
         return Err(no_trade(SkipReason::FeeTooHigh, eff_edge));
     }
 
-    // 4. Entry gate
+    // 5. Entry gate
     if !check_entry_gate(edge_abs, tau_min, p_market, b, 1.0) {
         return Err(no_trade(SkipReason::InsufficientEdge, eff_edge));
     }

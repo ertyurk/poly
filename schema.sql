@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS signal_state (
     valid_ticks INTEGER NOT NULL,
     variance REAL NOT NULL,
     drift REAL NOT NULL,
+    slow_drift REAL NOT NULL DEFAULT 0.0,
     lambda REAL NOT NULL,
     saved_at INTEGER NOT NULL,
     PRIMARY KEY (asset)

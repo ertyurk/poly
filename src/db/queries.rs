@@ -155,6 +155,7 @@ pub struct SavedSignalState {
     pub valid_ticks: u32,
     pub variance: f64,
     pub drift: f64,
+    pub slow_drift: f64,
     pub lambda: f64,
 }
 
@@ -164,8 +165,8 @@ pub fn save_signal_state(
     saved_at: TsMicros,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT OR REPLACE INTO signal_state (asset, last_price, last_ts, valid_ticks, variance, drift, lambda, saved_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT OR REPLACE INTO signal_state (asset, last_price, last_ts, valid_ticks, variance, drift, slow_drift, lambda, saved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             state.asset,
             state.last_price,
@@ -173,6 +174,7 @@ pub fn save_signal_state(
             state.valid_ticks,
             state.variance,
             state.drift,
+            state.slow_drift,
             state.lambda,
             saved_at,
         ],
@@ -186,7 +188,7 @@ pub fn load_signal_states(
 ) -> Result<Vec<SavedSignalState>, rusqlite::Error> {
     let cutoff = crate::types::now_micros() - max_age_secs * 1_000_000;
     let mut stmt = conn.prepare(
-        "SELECT asset, last_price, last_ts, valid_ticks, variance, drift, lambda
+        "SELECT asset, last_price, last_ts, valid_ticks, variance, drift, slow_drift, lambda
          FROM signal_state WHERE saved_at > ?1",
     )?;
     let rows = stmt.query_map(params![cutoff], |row| {
@@ -197,7 +199,8 @@ pub fn load_signal_states(
             valid_ticks: row.get(3)?,
             variance: row.get(4)?,
             drift: row.get(5)?,
-            lambda: row.get(6)?,
+            slow_drift: row.get(6)?,
+            lambda: row.get(7)?,
         })
     })?;
     let mut results = Vec::new();
