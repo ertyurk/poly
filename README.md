@@ -193,6 +193,39 @@ sqlite3 data/bot.db "SELECT COUNT(*) as trades, \
 
 See [`docs/dashboard-queries.md`](docs/dashboard-queries.md) for ready-to-use SQL queries.
 
+## Local profitability dashboard
+
+For fast local what-if analysis, run the built-in dashboard server:
+
+```bash
+cargo run --bin dashboard -- --db data/bot.db --port 3030
+```
+
+Then open `http://127.0.0.1:3030` in your browser.
+
+The dashboard is fully local and zero-build:
+- Rust server reads SQLite and serves JSON + HTML
+- Vanilla JS frontend auto-refreshes from the DB for live monitoring
+- Top cards show realized bankroll, estimated total equity, fees, and open exposure
+- Tables and charts show open positions, spot streams, settled trades, and fill rejections
+
+See `docs/local-dashboard.md` for the architecture and extension plan.
+
+## Just commands
+
+Use `just` to keep trader and dashboard commands separate:
+
+```bash
+just run-trader
+just run-trader-paper --asset btc --window 5m --bankroll 100
+just run-dashboard
+just run-dashboard-paper
+```
+
+`just run-trader` is the generic trader entrypoint. If you want the safe default, use `just run-trader-paper`.
+
+Run `just --list` to see the full command set.
+
 ## Project structure
 
 ```

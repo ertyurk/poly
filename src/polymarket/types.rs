@@ -27,6 +27,9 @@ pub struct GammaMarket {
     /// Token IDs as JSON string when `tokens` array is absent
     #[serde(rename = "clobTokenIds")]
     pub clob_token_ids: Option<String>,
+    /// Event slug (set after parsing, not from API).
+    #[serde(skip)]
+    pub event_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +55,19 @@ pub struct GammaEvent {
 // ---------------------------------------------------------------------------
 // CLOB API responses
 // ---------------------------------------------------------------------------
+
+/// CLOB API market response from `GET /markets/{condition_id}`.
+/// Contains the authoritative `winner` flag on each token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClobMarket {
+    pub tokens: Option<Vec<ClobToken>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClobToken {
+    pub outcome: Option<String>,
+    pub winner: Option<bool>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrderBookResponse {

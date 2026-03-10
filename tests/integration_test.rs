@@ -1,4 +1,4 @@
-use polymarket_bot::actors::decision::{decide, polymarket_fee_rate};
+use polymarket_bot::actors::decision::decide;
 use polymarket_bot::actors::executor::{Executor, Mode};
 use polymarket_bot::types::*;
 
@@ -9,11 +9,9 @@ async fn test_full_pipeline_paper_trade() {
     let confidence = (p_hat - 0.5).abs() * 2.0; // 0.50
 
     let p_market = 0.50;
-    let fee_rate = polymarket_fee_rate(p_market);
     let result = decide(
         p_hat,
         p_market,
-        fee_rate,
         0.05,      // tau_min
         100_000.0, // b (LMSR liquidity)
         0.5,       // kelly_fraction
@@ -26,6 +24,7 @@ async fn test_full_pipeline_paper_trade() {
         "test-mkt",
         0.48, // best_bid
         0.52, // best_ask
+        "",   // event_slug
     );
 
     let decision = result.expect("expected a trade decision, got skip");
@@ -58,11 +57,9 @@ fn test_full_pipeline_skip_low_edge() {
     let confidence = (p_hat - 0.5).abs() * 2.0; // ~0.0002
 
     let p_market = 0.50;
-    let fee_rate = polymarket_fee_rate(p_market);
     let result = decide(
         p_hat,
         p_market,
-        fee_rate,
         0.05, // tau_min
         100_000.0,
         0.5,
@@ -75,6 +72,7 @@ fn test_full_pipeline_skip_low_edge() {
         "test-mkt-2",
         0.48, // best_bid
         0.52, // best_ask
+        "",   // event_slug
     );
 
     assert!(

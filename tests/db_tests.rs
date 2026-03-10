@@ -61,6 +61,7 @@ fn test_insert_decision_and_trade() {
         open_price: Some(85000.0),
         volume_24h: 50000.0,
         market_type: MarketType::UpDown,
+        event_slug: String::new(),
     };
     db::queries::insert_market(&conn, &ms).unwrap();
 
@@ -76,6 +77,7 @@ fn test_insert_decision_and_trade() {
         best_bid: 0.48,
         best_ask: 0.52,
         ts: 1500000,
+        event_slug: String::new(),
     };
     let decision_id = db::queries::insert_decision(&conn, &dec).unwrap();
     assert!(decision_id > 0);
@@ -95,6 +97,7 @@ fn test_insert_decision_and_trade() {
         entry_ts: 1500000,
         resolved_ts: 2000000,
         estimated_slippage: 0.0,
+        event_slug: String::new(),
     };
     db::queries::insert_trade(&conn, &tr).unwrap();
 

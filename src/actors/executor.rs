@@ -40,6 +40,7 @@ struct OpenPosition {
     fee_rate: f64,
     entry_ts: TsMicros,
     estimated_slippage: f64,
+    event_slug: String,
 }
 
 /// Determines whether the executor places real orders or simulates fills.
@@ -107,6 +108,7 @@ impl Executor {
             fee_rate,
             entry_ts,
             estimated_slippage,
+            event_slug: String::new(),
         });
         if decision_id >= self.next_decision_id {
             self.next_decision_id = decision_id + 1;
@@ -185,7 +187,7 @@ impl Executor {
 
         let mut fill_price = match dec.side {
             Side::Yes => best_ask,
-            Side::No => 1.0 - best_bid,
+            Side::No => ((1.0 - best_bid) * 100.0).round() / 100.0,
         };
 
         // Reject if price slipped beyond tolerance
@@ -310,6 +312,7 @@ impl Executor {
             fee_rate: dec.fee_rate,
             entry_ts: dec.ts,
             estimated_slippage: slippage,
+            event_slug: dec.event_slug.clone(),
         });
 
         Ok(FillResult {
@@ -363,6 +366,7 @@ impl Executor {
                 entry_ts: pos.entry_ts,
                 resolved_ts,
                 estimated_slippage: pos.estimated_slippage,
+                event_slug: pos.event_slug,
             });
         }
 

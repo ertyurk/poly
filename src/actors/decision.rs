@@ -5,12 +5,6 @@ use crate::types::*;
 /// fee_per_share = price * FEE_RATE * (price * (1 - price))^2
 const FEE_RATE: f64 = 0.25;
 
-/// Compute raw edge: p_hat - p_market.
-#[inline]
-pub fn compute_edge(p_hat: f64, p_market: f64) -> f64 {
-    p_hat - p_market
-}
-
 /// Effective edge after fees: |edge| - fee_rate.
 #[inline]
 pub fn effective_edge(edge_abs: f64, fee_rate: f64) -> f64 {
@@ -49,7 +43,6 @@ pub fn apply_stealth_cap(size: f64, volume_24h: f64, max_pct: f64) -> f64 {
 pub fn decide(
     p_hat: f64,
     p_market: f64,
-    fee_rate: f64,
     tau_min: f64,
     b: f64,
     kelly_fraction: f64,
@@ -62,22 +55,20 @@ pub fn decide(
     market_id: &str,
     best_bid: f64,
     best_ask: f64,
+    event_slug: &str,
 ) -> Result<TradeDecision, NoTrade> {
     let ts = now_micros();
 
-    // Helper to build NoTrade
-    let no_trade = |edge: f64, reason: SkipReason, eff_edge: f64| NoTrade {
-        market_id: market_id.to_string(),
-        edge,
-        effective_edge: eff_edge,
-        fee_rate,
-        reason,
-        ts,
-    };
-
     // 1. Check confidence (doesn't need fill price)
     if confidence < min_confidence {
-        return Err(no_trade(p_hat - p_market, SkipReason::LowConfidence, 0.0));
+        return Err(NoTrade {
+            market_id: market_id.to_string(),
+            edge: p_hat - p_market,
+            effective_edge: 0.0,
+            fee_rate: 0.0,
+            reason: SkipReason::LowConfidence,
+            ts,
+        });
     }
 
     // 2. Determine trade direction from midpoint
@@ -90,7 +81,20 @@ pub fn decide(
         Side::No => 1.0 - best_bid,
     };
 
-    // 4. Range check on fill price (not midpoint)
+    // 4a. Compute fee based on fill price (not midpoint) for accuracy.
+    let fee_rate = polymarket_fee_rate(fill_price);
+
+    // Helper to build NoTrade
+    let no_trade = |edge: f64, reason: SkipReason, eff_edge: f64| NoTrade {
+        market_id: market_id.to_string(),
+        edge,
+        effective_edge: eff_edge,
+        fee_rate,
+        reason,
+        ts,
+    };
+
+    // 4b. Range check on fill price (not midpoint)
     if fill_price < 0.35 || fill_price > 0.65 {
         return Err(no_trade(p_hat - p_market, SkipReason::InsufficientEdge, 0.0));
     }
@@ -156,6 +160,7 @@ pub fn decide(
         best_bid,
         best_ask,
         ts,
+        event_slug: event_slug.to_string(),
     })
 }
 
@@ -236,12 +241,9 @@ impl DecisionActor {
                         continue;
                     };
 
-                    let fee_rate = polymarket_fee_rate(ms.midpoint);
-
                     let result = decide(
                         sig.p_hat,
                         ms.midpoint,
-                        fee_rate,
                         self.tau_min,
                         self.b,
                         self.kelly_fraction,
@@ -254,6 +256,7 @@ impl DecisionActor {
                         &sig.market_id,
                         ms.best_bid,
                         ms.best_ask,
+                        &ms.event_slug,
                     );
 
                     let output = match result {

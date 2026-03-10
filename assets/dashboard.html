@@ -1,0 +1,1682 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polymarket Bot Live Dashboard</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --bg-2: #09172a;
+      --panel: rgba(10, 18, 33, 0.92);
+      --panel-2: rgba(12, 22, 40, 0.94);
+      --panel-3: rgba(13, 27, 49, 0.92);
+      --border: rgba(148, 163, 184, 0.14);
+      --text: #e2e8f0;
+      --muted: #93a5c5;
+      --accent: #5eead4;
+      --blue: #60a5fa;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+      --radius: 18px;
+      --radius-lg: 24px;
+      --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.20), transparent 28%),
+        radial-gradient(circle at top right, rgba(94, 234, 212, 0.10), transparent 22%),
+        linear-gradient(180deg, var(--bg-2), var(--bg));
+      color: var(--text);
+      font-family: var(--font);
+    }
+
+    .app {
+      width: min(1480px, calc(100vw - 28px));
+      margin: 20px auto 40px;
+    }
+
+    .hero,
+    .panel,
+    .metric-card,
+    .spot-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, var(--panel-2), var(--panel));
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 26px 28px;
+      border-radius: var(--radius-lg);
+      display: flex;
+      gap: 24px;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(30px, 4vw, 42px);
+      line-height: 1.05;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 760px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .hero-meta {
+      min-width: 320px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .meta-card {
+      padding: 14px 16px;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-radius: 14px;
+      background: rgba(9, 15, 28, 0.65);
+    }
+
+    .meta-row {
+      display: grid;
+      grid-template-columns: 96px 1fr;
+      gap: 12px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .meta-row + .meta-row {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(148, 163, 184, 0.10);
+    }
+
+    .toolbar {
+      margin-top: 18px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    button,
+    select {
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(15, 23, 42, 0.8);
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    button {
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(94, 234, 212, 0.36);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status.good { color: #d1fae5; border-color: rgba(34, 197, 94, 0.24); }
+    .status.warn { color: #fde68a; border-color: rgba(245, 158, 11, 0.28); }
+    .status.bad { color: #fecaca; border-color: rgba(239, 68, 68, 0.28); }
+
+    .panel {
+      margin-top: 18px;
+      padding: 20px;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      margin-bottom: 16px;
+    }
+
+    .panel h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .panel-subtitle {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .control {
+      display: grid;
+      gap: 8px;
+    }
+
+    .control label {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .control select,
+    .control input[type="checkbox"] {
+      width: 100%;
+    }
+
+    .control select {
+      padding: 12px 14px;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 44px;
+      padding: 0 14px;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .checkbox-row input[type="checkbox"] {
+      width: auto;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .view-status {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .spot-grid,
+    .metrics {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .spot-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .metrics {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .spot-card,
+    .metric-card {
+      padding: 16px 18px;
+    }
+
+    .spot-label,
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+    }
+
+    .spot-value,
+    .metric-value {
+      font-size: clamp(24px, 3vw, 34px);
+      font-weight: 700;
+      line-height: 1.1;
+    }
+
+    .spot-footnote,
+    .metric-footnote {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .neutral { color: var(--text); }
+    .muted { color: var(--muted); }
+
+    .grid-two {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .grid-three {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .sparkline,
+    .chart {
+      min-height: 220px;
+    }
+
+    .chart-card {
+      min-height: 260px;
+      padding: 16px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.55);
+      border: 1px solid rgba(148, 163, 184, 0.10);
+    }
+
+    .chart-card svg,
+    .spot-sparkline svg {
+      width: 100%;
+      display: block;
+    }
+
+    .chart-card svg { height: 260px; }
+    .spot-sparkline svg { height: 80px; }
+
+    .chart-caption {
+      margin-top: 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .bar-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 140px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .bar-label {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .bar-meta {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .bar-track {
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.10);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .bar-fill {
+      position: absolute;
+      inset: 0 auto 0 0;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--blue), var(--accent));
+    }
+
+    .bar-fill.negative {
+      background: linear-gradient(90deg, #f97316, var(--red));
+    }
+
+    .note-list,
+    .activity-feed {
+      display: grid;
+      gap: 12px;
+    }
+
+    .note,
+    .activity-item {
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.10);
+    }
+
+    .note-title,
+    .activity-title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .note-body,
+    .activity-body {
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .activity-meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      background: rgba(15, 23, 42, 0.55);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.09);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: rgba(8, 13, 24, 0.86);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      z-index: 1;
+    }
+
+    td strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+
+    td small {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(96, 165, 250, 0.22);
+      background: rgba(96, 165, 250, 0.10);
+      color: #dbeafe;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .empty {
+      padding: 26px 18px;
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.35);
+      border: 1px dashed rgba(148, 163, 184, 0.16);
+      color: var(--muted);
+      text-align: center;
+      font-size: 14px;
+    }
+
+    code {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.86);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      color: var(--text);
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-all;
+    }
+
+    .footer-note {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 1240px) {
+      .controls,
+      .spot-grid,
+      .metrics,
+      .grid-three {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .grid-two,
+      .hero {
+        grid-template-columns: 1fr;
+        flex-direction: column;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .app {
+        width: min(100vw - 16px, 1480px);
+        margin: 8px auto 20px;
+      }
+
+      .hero,
+      .panel,
+      .metric-card,
+      .spot-card {
+        padding: 16px;
+      }
+
+      .controls,
+      .spot-grid,
+      .metrics,
+      .grid-two,
+      .grid-three {
+        grid-template-columns: 1fr;
+      }
+
+      .bar-row {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">Live account monitor</div>
+        <h1>Trading Dashboard</h1>
+        <p>
+          A local real-time view over the SQLite database: current account state, estimated equity,
+          open positions, fees, rejections, and the trade history that is actually driving P&amp;L.
+        </p>
+        <div class="toolbar">
+          <button id="refreshButton" type="button">Refresh now</button>
+          <span id="statusBadge" class="status">Loading…</span>
+        </div>
+      </div>
+      <div class="hero-meta">
+        <div class="meta-card">
+          <div class="meta-row"><span>Database</span><code id="dbPath">—</code></div>
+          <div class="meta-row"><span>Generated</span><span id="generatedAt">—</span></div>
+          <div class="meta-row"><span>Filters</span><span id="filterSummary">All assets · All windows · All sides</span></div>
+        </div>
+        <div class="meta-card">
+          <div class="meta-row"><span>Meaning</span><span>Account cards stay global. Filtered slice cards and all drill-down panels react instantly to asset, window, and side filters.</span></div>
+          <div class="meta-row"><span>Usage</span><span>Watch balance, fees, open risk, and where the losses cluster.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>View Controls</h2>
+        <div class="panel-subtitle">Auto-refresh updates from SQLite without reloading the page.</div>
+      </div>
+      <div class="controls">
+        <div class="control">
+          <label for="assetFilter">Asset</label>
+          <select id="assetFilter"><option value="all">All assets</option></select>
+        </div>
+        <div class="control">
+          <label for="windowFilter">Window</label>
+          <select id="windowFilter"><option value="all">All windows</option></select>
+        </div>
+        <div class="control">
+          <label for="sideFilter">Side</label>
+          <select id="sideFilter"><option value="all">All sides</option></select>
+        </div>
+        <div class="control">
+          <label for="autoRefreshToggle">Auto refresh</label>
+          <div class="checkbox-row">
+            <input id="autoRefreshToggle" type="checkbox" checked>
+            <span>Keep polling the database</span>
+          </div>
+        </div>
+        <div class="control">
+          <label for="refreshInterval">Refresh every</label>
+          <select id="refreshInterval">
+            <option value="5000">5 seconds</option>
+            <option value="10000">10 seconds</option>
+            <option value="15000">15 seconds</option>
+            <option value="30000">30 seconds</option>
+            <option value="60000">60 seconds</option>
+          </select>
+        </div>
+        <div class="control">
+          <label>&nbsp;</label>
+          <button id="resetFiltersButton" type="button">Reset filters</button>
+        </div>
+      </div>
+      <div id="viewStatus" class="view-status">Loading current account view…</div>
+    </section>
+
+    <section id="spotCards" class="spot-grid"></section>
+    <section id="metricCards" class="metrics"></section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Filtered Slice</h2>
+        <div class="panel-subtitle">These cards change immediately with the current asset / window / side filter selection.</div>
+      </div>
+      <div id="sliceCards" class="metrics"></div>
+    </section>
+
+    <section class="grid-two">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Equity Curve</h2>
+          <div class="panel-subtitle">Realized bankroll path with current estimated total equity</div>
+        </div>
+        <div id="equityChart" class="chart"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Live Notes</h2>
+          <div class="panel-subtitle">Warnings and plain-English read on the book</div>
+        </div>
+        <div id="alertsList" class="note-list"></div>
+      </div>
+    </section>
+
+    <section class="grid-two">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Spot Price Streams</h2>
+          <div class="panel-subtitle">Latest BTC / ETH ticks from the database</div>
+        </div>
+        <div id="spotCharts" class="chart"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Fee Accumulation</h2>
+          <div class="panel-subtitle">Settled fees over time, plus estimated fees on open positions</div>
+        </div>
+        <div id="feeChart" class="chart"></div>
+      </div>
+    </section>
+
+    <section class="grid-three">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>P&amp;L by Asset</h2>
+          <div class="panel-subtitle">Which asset actually pays</div>
+        </div>
+        <div id="pnlByAsset" class="chart"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>P&amp;L by Window</h2>
+          <div class="panel-subtitle">Which time horizon is worth your focus</div>
+        </div>
+        <div id="pnlByWindow" class="chart"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>P&amp;L by Side</h2>
+          <div class="panel-subtitle">Is directional bias helping or hurting</div>
+        </div>
+        <div id="pnlBySide" class="chart"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Open Positions</h2>
+        <div class="panel-subtitle">Mark-to-market view from the latest YES book snapshot</div>
+      </div>
+      <div id="openPositionsTable"></div>
+    </section>
+
+    <section class="grid-two">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Recent Activity</h2>
+          <div class="panel-subtitle">New fills, settlements, and rejections</div>
+        </div>
+        <div id="activityFeed" class="activity-feed"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Fill Rejections</h2>
+          <div class="panel-subtitle">What prevented execution</div>
+        </div>
+        <div id="rejectionTable"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Settled Trades</h2>
+        <div class="panel-subtitle">Latest resolved trades in the current view</div>
+      </div>
+      <div id="tradeTable"></div>
+      <div class="footer-note">
+        Open-position mark values are estimated from the latest YES order book snapshot: YES uses `best_bid`; NO uses `1 - best_ask`.
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const state = {
+      payload: null,
+      refreshHandle: null,
+    };
+
+    const moneyFormatter = new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: 'USD',
+      maximumFractionDigits: 2,
+    });
+
+    const numberFormatter = new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 2,
+    });
+
+    const pctFormatter = new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 1,
+      minimumFractionDigits: 1,
+    });
+
+    window.addEventListener('DOMContentLoaded', () => {
+      bindControls();
+      refreshData().catch((error) => {
+        console.error(error);
+        setStatus(error.message || 'Failed to load dashboard', 'bad');
+      });
+    });
+
+    function bindControls() {
+      ['assetFilter', 'windowFilter', 'sideFilter'].forEach((id) => {
+        document.getElementById(id).addEventListener('change', render);
+      });
+
+      document.getElementById('refreshButton').addEventListener('click', () => {
+        refreshData().catch((error) => {
+          console.error(error);
+          setStatus(error.message || 'Failed to refresh dashboard', 'bad');
+        });
+      });
+
+      document.getElementById('resetFiltersButton').addEventListener('click', () => {
+        resetFilters();
+        render();
+      });
+
+      document.getElementById('autoRefreshToggle').addEventListener('change', syncAutoRefresh);
+      document.getElementById('refreshInterval').addEventListener('change', syncAutoRefresh);
+    }
+
+    async function refreshData() {
+      setStatus('Refreshing database…', 'warn');
+      const response = await fetch('/api/bootstrap', { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to load dashboard payload');
+      }
+
+      state.payload = payload;
+      populateSelect('assetFilter', payload.filters.assets, 'All assets');
+      populateSelect('windowFilter', payload.filters.windows, 'All windows');
+      populateSelect('sideFilter', payload.filters.sides, 'All sides');
+
+      document.getElementById('dbPath').textContent = payload.db_path;
+      document.getElementById('generatedAt').textContent = formatTime(payload.generated_at);
+      syncAutoRefresh();
+      render();
+      setStatus(`Live data loaded · ${payload.trades.length} settled trades · ${payload.open_positions.length} open positions`, 'good');
+    }
+
+    function populateSelect(id, values, allLabel) {
+      const select = document.getElementById(id);
+      const previous = select.value || 'all';
+      select.innerHTML = '';
+      const defaultOption = document.createElement('option');
+      defaultOption.value = 'all';
+      defaultOption.textContent = allLabel;
+      select.appendChild(defaultOption);
+      values.forEach((value) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+      });
+      if ([...select.options].some((option) => option.value === previous)) {
+        select.value = previous;
+      }
+    }
+
+    function resetFilters() {
+      document.getElementById('assetFilter').value = 'all';
+      document.getElementById('windowFilter').value = 'all';
+      document.getElementById('sideFilter').value = 'all';
+    }
+
+    function syncAutoRefresh() {
+      if (state.refreshHandle) {
+        clearInterval(state.refreshHandle);
+        state.refreshHandle = null;
+      }
+
+      const enabled = document.getElementById('autoRefreshToggle').checked;
+      const intervalMs = Number(document.getElementById('refreshInterval').value);
+      if (!enabled || !state.payload) {
+        return;
+      }
+
+      state.refreshHandle = window.setInterval(() => {
+        refreshData().catch((error) => {
+          console.error(error);
+          setStatus(error.message || 'Auto-refresh failed', 'bad');
+        });
+      }, intervalMs);
+    }
+
+    function currentFilters() {
+      return {
+        asset: document.getElementById('assetFilter').value,
+        window: document.getElementById('windowFilter').value,
+        side: document.getElementById('sideFilter').value,
+      };
+    }
+
+    function render() {
+      if (!state.payload) {
+        return;
+      }
+
+      const filters = currentFilters();
+      const filteredTrades = state.payload.trades.filter((trade) => tradeMatches(trade, filters));
+      const filteredOpenPositions = state.payload.open_positions.filter((position) => positionMatches(position, filters));
+      const filteredRejections = state.payload.fill_rejections.filter((rejection) => rejectionMatches(rejection, filters));
+      const filteredSpots = filterSpotPoints(state.payload.spot_points, filters.asset);
+
+      const overall = computeOverview(
+        state.payload.trades,
+        state.payload.open_positions,
+        state.payload.initial_bankroll,
+        state.payload.realized_bankroll,
+        state.payload.estimated_total_equity,
+      );
+      const filtered = computeSlice(filteredTrades, filteredOpenPositions);
+
+      renderFilterSummary(filters, filteredTrades, filteredOpenPositions, filteredRejections);
+      renderSpotCards(filteredSpots.length > 0 ? filteredSpots : state.payload.spot_points);
+      renderMetrics(overall, filtered);
+      renderSliceMetrics(filtered);
+      renderEquityChart(state.payload.trades, state.payload.initial_bankroll, state.payload.estimated_total_equity);
+      renderAlerts(overall, state.payload.spot_points, state.payload.open_positions, state.payload.fill_rejections);
+      renderSpotCharts(filteredSpots.length > 0 ? filteredSpots : state.payload.spot_points);
+      renderFeeChart(state.payload.trades, state.payload.open_positions);
+      renderBarChart('pnlByAsset', aggregateTrades(filteredTrades, (trade) => trade.asset), 'asset');
+      renderBarChart('pnlByWindow', aggregateTrades(filteredTrades, (trade) => trade.window), 'window');
+      renderBarChart('pnlBySide', aggregateTrades(filteredTrades, (trade) => trade.side), 'side');
+      renderOpenPositionsTable(filteredOpenPositions);
+      renderActivityFeed(filteredTrades, filteredOpenPositions, filteredRejections);
+      renderRejectionTable(filteredRejections);
+      renderTradeTable(filteredTrades);
+    }
+
+    function computeOverview(trades, openPositions, initialBankroll, realizedBankroll, estimatedTotalEquity) {
+      const wins = trades.filter((trade) => trade.outcome === 'WIN').length;
+      const settledFees = sum(trades.map((trade) => trade.fee_paid));
+      const realizedPnl = sum(trades.map((trade) => trade.pnl));
+      const estimatedOpenFees = sum(openPositions.map((position) => position.estimated_entry_fee));
+      const openExposure = sum(openPositions.map((position) => position.cost_basis));
+      const openMarkValue = sum(openPositions.map((position) => position.current_value || 0));
+      const openPnlNet = sum(openPositions.map((position) => position.unrealized_pnl_net || 0));
+      const grossProfit = sum(trades.filter((trade) => trade.pnl > 0).map((trade) => trade.pnl));
+      const grossLoss = Math.abs(sum(trades.filter((trade) => trade.pnl < 0).map((trade) => trade.pnl)));
+      const totalTrades = trades.length;
+
+      return {
+        initialBankroll,
+        realizedBankroll,
+        estimatedTotalEquity,
+        realizedPnl,
+        settledFees,
+        estimatedOpenFees,
+        openExposure,
+        openMarkValue,
+        openPnlNet,
+        openCount: openPositions.length,
+        totalTrades,
+        winRate: totalTrades > 0 ? (wins / totalTrades) * 100 : 0,
+        profitFactor: grossLoss > 0 ? grossProfit / grossLoss : null,
+      };
+    }
+
+    function computeSlice(trades, openPositions) {
+      const netPnl = sum(trades.map((trade) => trade.pnl));
+      const wins = trades.filter((trade) => trade.outcome === 'WIN').length;
+      const totalTrades = trades.length;
+      const avgPnl = totalTrades > 0 ? netPnl / totalTrades : 0;
+      const avgDuration = totalTrades > 0 ? sum(trades.map((trade) => trade.duration_secs)) / totalTrades : 0;
+      const openPnl = sum(openPositions.map((position) => position.unrealized_pnl_net || 0));
+      const settledFees = sum(trades.map((trade) => trade.fee_paid));
+      const openExposure = sum(openPositions.map((position) => position.cost_basis));
+      const markValue = sum(openPositions.map((position) => position.current_value || 0));
+      return {
+        trades: totalTrades,
+        openCount: openPositions.length,
+        netPnl,
+        avgPnl,
+        winRate: totalTrades > 0 ? (wins / totalTrades) * 100 : 0,
+        avgDuration,
+        openPnl,
+        settledFees,
+        openExposure,
+        markValue,
+      };
+    }
+
+    function renderFilterSummary(filters, filteredTrades, filteredOpenPositions, filteredRejections) {
+      const parts = [
+        filters.asset === 'all' ? 'All assets' : filters.asset,
+        filters.window === 'all' ? 'All windows' : filters.window,
+        filters.side === 'all' ? 'All sides' : filters.side,
+      ];
+      document.getElementById('filterSummary').textContent = parts.join(' · ');
+      document.getElementById('viewStatus').textContent =
+        `Current drill-down: ${parts.join(' · ')} · ${filteredTrades.length} settled trades · ` +
+        `${filteredOpenPositions.length} open positions · ${filteredRejections.length} fill rejections · ` +
+        `account cards stay global, slice cards below are filtered`;
+    }
+
+    function renderSpotCards(spotPoints) {
+      const container = document.getElementById('spotCards');
+      const grouped = groupBy(spotPoints, (point) => point.asset);
+      const entries = [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right));
+      if (entries.length === 0) {
+        container.innerHTML = emptyState('No spot prices in the database yet.');
+        return;
+      }
+
+      container.innerHTML = entries.map(([asset, points]) => {
+        const latest = points[points.length - 1];
+        const first = points[0];
+        const changePct = first && latest && first.price > 0
+          ? ((latest.price - first.price) / first.price) * 100
+          : 0;
+        return `
+          <article class="spot-card">
+            <div class="spot-label">${escapeHtml(asset)} spot</div>
+            <div class="spot-value">${escapeHtml(money(latest.price))}</div>
+            <div class="spot-footnote ${signClass(changePct)}">${escapeHtml(pct(changePct))} over shown sample · ${escapeHtml(formatAge(latest.ts))}</div>
+            <div class="spot-sparkline">${sparklineSvg(points.map((point) => point.price), changePct >= 0 ? '#22c55e' : '#ef4444')}</div>
+          </article>
+        `;
+      }).join('');
+    }
+
+    function renderMetrics(overall, filtered) {
+      const metrics = [
+        {
+          label: 'Realized bankroll',
+          value: money(overall.realizedBankroll),
+          className: signClass(overall.realizedPnl),
+          footnote: `Initial ${money(overall.initialBankroll)}`,
+        },
+        {
+          label: 'Estimated total equity',
+          value: money(overall.estimatedTotalEquity),
+          className: signClass(overall.estimatedTotalEquity - overall.initialBankroll),
+          footnote: 'Realized bankroll + open P&L estimate',
+        },
+        {
+          label: 'Realized P&L',
+          value: money(overall.realizedPnl),
+          className: signClass(overall.realizedPnl),
+          footnote: `${overall.totalTrades} settled trades`,
+        },
+        {
+          label: 'Open P&L (est.)',
+          value: money(overall.openPnlNet),
+          className: signClass(overall.openPnlNet),
+          footnote: `${overall.openCount} open positions`,
+        },
+        {
+          label: 'Settled fees',
+          value: money(overall.settledFees),
+          className: overall.settledFees > 0 ? 'negative' : 'neutral',
+          footnote: 'Fees booked on resolved trades',
+        },
+        {
+          label: 'Open fees (est.)',
+          value: money(overall.estimatedOpenFees),
+          className: overall.estimatedOpenFees > 0 ? 'negative' : 'neutral',
+          footnote: 'Estimated entry fees on open positions',
+        },
+        {
+          label: 'Open exposure',
+          value: money(overall.openExposure),
+          className: 'neutral',
+          footnote: `Mark value ${money(overall.openMarkValue)}`,
+        },
+        {
+          label: 'Win rate',
+          value: pct(overall.winRate),
+          className: 'neutral',
+          footnote: overall.profitFactor == null ? 'Profit factor —' : `Profit factor ${overall.profitFactor.toFixed(2)}x`,
+        },
+      ];
+
+      document.getElementById('metricCards').innerHTML = metrics.map((metric) => `
+        <article class="metric-card">
+          <div class="metric-label">${escapeHtml(metric.label)}</div>
+          <div class="metric-value ${metric.className}">${escapeHtml(metric.value)}</div>
+          <div class="metric-footnote">${escapeHtml(metric.footnote)}</div>
+        </article>
+      `).join('');
+    }
+
+    function renderSliceMetrics(filtered) {
+      const metrics = [
+        {
+          label: 'Filtered settled P&L',
+          value: money(filtered.netPnl),
+          className: signClass(filtered.netPnl),
+          footnote: `${filtered.trades} settled trades in view`,
+        },
+        {
+          label: 'Filtered open P&L',
+          value: money(filtered.openPnl),
+          className: signClass(filtered.openPnl),
+          footnote: `${filtered.openCount} open positions in view`,
+        },
+        {
+          label: 'Filtered settled fees',
+          value: money(filtered.settledFees),
+          className: filtered.settledFees > 0 ? 'negative' : 'neutral',
+          footnote: 'Settled fees in the current slice',
+        },
+        {
+          label: 'Filtered open exposure',
+          value: money(filtered.openExposure),
+          className: 'neutral',
+          footnote: `Mark value ${money(filtered.markValue)}`,
+        },
+        {
+          label: 'Slice expectancy',
+          value: money(filtered.avgPnl),
+          className: signClass(filtered.avgPnl),
+          footnote: 'Average P&L per settled trade in view',
+        },
+        {
+          label: 'Slice win rate',
+          value: pct(filtered.winRate),
+          className: 'neutral',
+          footnote: 'Only for settled trades in view',
+        },
+        {
+          label: 'Avg duration',
+          value: filtered.trades > 0 ? `${Math.round(filtered.avgDuration)}s` : '—',
+          className: 'neutral',
+          footnote: 'Average time from entry to settlement',
+        },
+        {
+          label: 'Slice footprint',
+          value: `${filtered.trades}T / ${filtered.openCount}O`,
+          className: 'neutral',
+          footnote: 'Settled trades / open positions in view',
+        },
+      ];
+
+      document.getElementById('sliceCards').innerHTML = metrics.map((metric) => `
+        <article class="metric-card">
+          <div class="metric-label">${escapeHtml(metric.label)}</div>
+          <div class="metric-value ${metric.className}">${escapeHtml(metric.value)}</div>
+          <div class="metric-footnote">${escapeHtml(metric.footnote)}</div>
+        </article>
+      `).join('');
+    }
+
+    function renderEquityChart(trades, initialBankroll, estimatedTotalEquity) {
+      const container = document.getElementById('equityChart');
+      if (trades.length === 0) {
+        container.innerHTML = emptyState('No settled trades yet.');
+        return;
+      }
+
+      const sorted = [...trades].sort((left, right) => left.resolved_ts - right.resolved_ts || left.decision_id - right.decision_id);
+      const realizedPoints = [{ ts: sorted[0].entry_ts, value: initialBankroll }];
+      sorted.forEach((trade) => {
+        realizedPoints.push({ ts: trade.resolved_ts, value: trade.bankroll_after });
+      });
+      const latestTs = Math.max(realizedPoints[realizedPoints.length - 1].ts, Date.now() * 1000);
+      const points = [...realizedPoints, { ts: latestTs, value: estimatedTotalEquity }];
+
+      container.innerHTML = lineChart(points, {
+        captionLeft: `Start ${money(initialBankroll)}`,
+        captionCenter: `Realized ${money(sorted[sorted.length - 1].bankroll_after)}`,
+        captionRight: `Estimated equity ${money(estimatedTotalEquity)}`,
+        color: estimatedTotalEquity >= initialBankroll ? '#22c55e' : '#ef4444',
+      });
+    }
+
+    function renderAlerts(overall, spotPoints, openPositions, fillRejections) {
+      const container = document.getElementById('alertsList');
+      const notes = [];
+      const latestSpots = [...groupBy(spotPoints, (point) => point.asset).values()].map((points) => points[points.length - 1]);
+      const staleSpots = latestSpots.filter((point) => Date.now() - point.ts / 1000 > 60_000);
+      if (staleSpots.length > 0) {
+        notes.push({
+          title: 'Spot feed looks stale',
+          body: `${staleSpots.map((spot) => `${spot.asset} ${formatAge(spot.ts)}`).join(', ')}. Check if ingest is still writing spot ticks.`,
+        });
+      } else if (latestSpots.length > 0) {
+        notes.push({
+          title: 'Spot feed is fresh',
+          body: `${latestSpots.map((spot) => `${spot.asset} ${formatAge(spot.ts)}`).join(' · ')}.`,
+        });
+      }
+
+      const staleBooks = openPositions.filter((position) => !position.latest_book_ts || (Date.now() - position.latest_book_ts / 1000 > 60_000));
+      if (staleBooks.length > 0) {
+        notes.push({
+          title: 'Open positions without fresh books',
+          body: `${staleBooks.length} open positions do not have a recent order book snapshot. Mark-to-market may be stale.`,
+        });
+      }
+
+      const recentRejections = fillRejections.filter((rejection) => Date.now() - rejection.ts / 1000 <= 30 * 60_000);
+      if (recentRejections.length > 5) {
+        notes.push({
+          title: 'Execution friction is elevated',
+          body: `${recentRejections.length} fill rejections hit in the last 30 minutes. This is often a sign that your book quality or sizing rules are too loose.`,
+        });
+      }
+
+      if (overall.openPnlNet < 0) {
+        notes.push({
+          title: 'Open book is underwater',
+          body: `Estimated open P&L is ${money(overall.openPnlNet)}. Watch whether this is concentrated in one side, asset, or window bucket.`,
+        });
+      }
+
+      if (overall.estimatedTotalEquity < overall.initialBankroll) {
+        notes.push({
+          title: 'Account is below start',
+          body: `Estimated total equity is ${money(overall.estimatedTotalEquity)}, below the starting bankroll of ${money(overall.initialBankroll)}. Focus first on the buckets with the worst expectancy.`,
+        });
+      }
+
+      if (notes.length === 0) {
+        notes.push({
+          title: 'No urgent warnings',
+          body: 'Feeds look live and there are no obvious execution alerts. Keep watching fee drag and open-risk concentration.',
+        });
+      }
+
+      container.innerHTML = notes.map((note) => `
+        <div class="note">
+          <div class="note-title">${escapeHtml(note.title)}</div>
+          <div class="note-body">${escapeHtml(note.body)}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderSpotCharts(spotPoints) {
+      const container = document.getElementById('spotCharts');
+      const grouped = [...groupBy(spotPoints, (point) => point.asset).entries()].sort(([left], [right]) => left.localeCompare(right));
+      if (grouped.length === 0) {
+        container.innerHTML = emptyState('No spot series available.');
+        return;
+      }
+
+      container.innerHTML = grouped.map(([asset, points]) => {
+        const first = points[0];
+        const latest = points[points.length - 1];
+        const change = first && latest && first.price > 0 ? ((latest.price - first.price) / first.price) * 100 : 0;
+        return `
+          <div class="chart-card" style="margin-bottom: 14px;">
+            <div class="panel-header" style="margin-bottom: 10px;">
+              <h2 style="font-size: 16px; margin: 0;">${escapeHtml(asset)}</h2>
+              <div class="panel-subtitle ${signClass(change)}">${escapeHtml(pct(change))} · ${escapeHtml(money(latest.price))}</div>
+            </div>
+            ${lineChart(points.map((point) => ({ ts: point.ts, value: point.price })), {
+              captionLeft: formatTime(first.ts),
+              captionCenter: `Latest ${money(latest.price)}`,
+              captionRight: formatAge(latest.ts),
+              color: change >= 0 ? '#22c55e' : '#ef4444',
+            })}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderFeeChart(trades, openPositions) {
+      const container = document.getElementById('feeChart');
+      if (trades.length === 0) {
+        container.innerHTML = emptyState('No settled fee history yet.');
+        return;
+      }
+
+      const sorted = [...trades].sort((left, right) => left.resolved_ts - right.resolved_ts);
+      let cumulative = 0;
+      const points = sorted.map((trade) => {
+        cumulative += trade.fee_paid;
+        return { ts: trade.resolved_ts, value: cumulative };
+      });
+      const openFees = sum(openPositions.map((position) => position.estimated_entry_fee));
+
+      container.innerHTML = lineChart(points, {
+        captionLeft: `Settled fees ${money(cumulative)}`,
+        captionCenter: `Open est. ${money(openFees)}`,
+        captionRight: `${sorted.length} fee events`,
+        color: '#f59e0b',
+      });
+    }
+
+    function renderBarChart(targetId, buckets, kind) {
+      const container = document.getElementById(targetId);
+      if (buckets.length === 0) {
+        container.innerHTML = emptyState('No settled trades for this view.');
+        return;
+      }
+
+      const sorted = sortBuckets(buckets, kind);
+      const maxAbs = Math.max(...sorted.map((bucket) => Math.abs(bucket.netPnl)), 0.01);
+      container.innerHTML = `
+        <div class="bar-list">
+          ${sorted.map((bucket) => {
+            const width = Math.max((Math.abs(bucket.netPnl) / maxAbs) * 100, 3);
+            return `
+              <div class="bar-row">
+                <div>
+                  <div class="bar-label">${escapeHtml(bucket.label)}</div>
+                  <div class="bar-meta">${bucket.trades} trades · ${pct(bucket.winRate)} win · ${money(bucket.avgPnl)} avg</div>
+                </div>
+                <div class="bar-track"><div class="bar-fill ${bucket.netPnl < 0 ? 'negative' : ''}" style="width:${width}%;"></div></div>
+                <div class="${signClass(bucket.netPnl)}">${escapeHtml(money(bucket.netPnl))}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function renderOpenPositionsTable(openPositions) {
+      const container = document.getElementById('openPositionsTable');
+      if (openPositions.length === 0) {
+        container.innerHTML = emptyState('No open positions in the current view.');
+        return;
+      }
+
+      const rows = [...openPositions]
+        .sort((left, right) => right.entry_ts - left.entry_ts)
+        .map((position) => `
+          <tr>
+            <td>
+              <strong>${escapeHtml(position.market_id)}</strong>
+              <small>${escapeHtml(position.asset)} · ${escapeHtml(position.window)} · ${escapeHtml(position.side)}</small>
+            </td>
+            <td>${cents(position.entry_price)}</td>
+            <td>${position.mark_price == null ? '—' : cents(position.mark_price)}</td>
+            <td>${number(position.size_shares)}</td>
+            <td>${money(position.cost_basis)}</td>
+            <td>${position.current_value == null ? '—' : money(position.current_value)}</td>
+            <td>${money(position.estimated_entry_fee)}</td>
+            <td class="${signClass(position.unrealized_pnl_net || 0)}">${position.unrealized_pnl_net == null ? '—' : money(position.unrealized_pnl_net)}</td>
+            <td>${position.latest_spread == null ? '—' : cents(position.latest_spread)}</td>
+            <td>${position.minutes_to_resolution == null ? '—' : minutesLabel(position.minutes_to_resolution)}</td>
+          </tr>
+        `).join('');
+
+      container.innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Entry</th>
+                <th>Mark</th>
+                <th>Shares</th>
+                <th>Cost basis</th>
+                <th>Current value</th>
+                <th>Est. fee</th>
+                <th>Unrealized P&amp;L</th>
+                <th>Spread</th>
+                <th>Time to resolve</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderActivityFeed(trades, openPositions, rejections) {
+      const container = document.getElementById('activityFeed');
+      const items = [];
+
+      trades.forEach((trade) => {
+        items.push({
+          ts: trade.resolved_ts,
+          title: `${trade.market_id} settled ${trade.outcome}`,
+          body: `${trade.side} ${money(trade.pnl)} · fee ${money(trade.fee_paid)}`,
+          metaLeft: `${trade.asset} · ${trade.window}`,
+          metaRight: formatTime(trade.resolved_ts),
+        });
+      });
+
+      openPositions.forEach((position) => {
+        items.push({
+          ts: position.entry_ts,
+          title: `${position.market_id} still open`,
+          body: `${position.side} ${money(position.cost_basis)} cost basis · current ${position.current_value == null ? '—' : money(position.current_value)}`,
+          metaLeft: `${position.asset} · ${position.window}`,
+          metaRight: formatTime(position.entry_ts),
+        });
+      });
+
+      rejections.forEach((rejection) => {
+        items.push({
+          ts: rejection.ts,
+          title: `${rejection.market_id} rejected`,
+          body: `${rejection.reason} · ${rejection.side} ${money(rejection.size)} @ ${cents(rejection.price)}`,
+          metaLeft: `${rejection.asset} · ${rejection.window}`,
+          metaRight: formatTime(rejection.ts),
+        });
+      });
+
+      if (items.length === 0) {
+        container.innerHTML = emptyState('No activity in the current view.');
+        return;
+      }
+
+      container.innerHTML = items
+        .sort((left, right) => right.ts - left.ts)
+        .slice(0, 18)
+        .map((item) => `
+          <div class="activity-item">
+            <div class="activity-title">${escapeHtml(item.title)}</div>
+            <div class="activity-body">${escapeHtml(item.body)}</div>
+            <div class="activity-meta">
+              <span>${escapeHtml(item.metaLeft)}</span>
+              <span>${escapeHtml(item.metaRight)}</span>
+            </div>
+          </div>
+        `).join('');
+    }
+
+    function renderRejectionTable(rejections) {
+      const container = document.getElementById('rejectionTable');
+      if (rejections.length === 0) {
+        container.innerHTML = emptyState('No fill rejections in the current view.');
+        return;
+      }
+
+      const grouped = new Map();
+      for (const rejection of rejections) {
+        if (!grouped.has(rejection.reason)) {
+          grouped.set(rejection.reason, []);
+        }
+        grouped.get(rejection.reason).push(rejection);
+      }
+
+      const rows = [...grouped.entries()]
+        .map(([reason, items]) => ({
+          reason,
+          count: items.length,
+          latestTs: Math.max(...items.map((item) => item.ts)),
+          avgPrice: sum(items.map((item) => item.price)) / items.length,
+          avgSize: sum(items.map((item) => item.size)) / items.length,
+        }))
+        .sort((left, right) => right.count - left.count);
+
+      container.innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Reason</th>
+                <th>Count</th>
+                <th>Avg price</th>
+                <th>Avg size</th>
+                <th>Latest</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row) => `
+                <tr>
+                  <td><span class="tag">${escapeHtml(row.reason)}</span></td>
+                  <td>${row.count}</td>
+                  <td>${cents(row.avgPrice)}</td>
+                  <td>${money(row.avgSize)}</td>
+                  <td>${escapeHtml(formatTime(row.latestTs))}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderTradeTable(trades) {
+      const container = document.getElementById('tradeTable');
+      if (trades.length === 0) {
+        container.innerHTML = emptyState('No settled trades in the current view.');
+        return;
+      }
+
+      const rows = [...trades]
+        .sort((left, right) => right.resolved_ts - left.resolved_ts || right.decision_id - left.decision_id)
+        .slice(0, 30)
+        .map((trade) => `
+          <tr>
+            <td>
+              <strong>${escapeHtml(trade.market_id)}</strong>
+              <small>${escapeHtml(trade.asset)} · ${escapeHtml(trade.window)} · ${escapeHtml(trade.side)}</small>
+            </td>
+            <td>${escapeHtml(trade.outcome)}</td>
+            <td>${cents(trade.entry_price)}</td>
+            <td>${trade.size_usd == null ? '—' : money(trade.size_usd)}</td>
+            <td>${money(trade.fee_paid)}</td>
+            <td class="${signClass(trade.pnl)}">${money(trade.pnl)}</td>
+            <td>${trade.entry_spread == null ? '—' : cents(trade.entry_spread)}</td>
+            <td>${trade.duration_secs ? `${Math.round(trade.duration_secs)}s` : '—'}</td>
+            <td>${escapeHtml(formatTime(trade.resolved_ts))}</td>
+          </tr>
+        `).join('');
+
+      container.innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Outcome</th>
+                <th>Entry</th>
+                <th>Size USD</th>
+                <th>Fee</th>
+                <th>P&amp;L</th>
+                <th>Spread</th>
+                <th>Duration</th>
+                <th>Resolved</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function tradeMatches(trade, filters) {
+      return (filters.asset === 'all' || trade.asset === filters.asset)
+        && (filters.window === 'all' || trade.window === filters.window)
+        && (filters.side === 'all' || trade.side === filters.side);
+    }
+
+    function positionMatches(position, filters) {
+      return (filters.asset === 'all' || position.asset === filters.asset)
+        && (filters.window === 'all' || position.window === filters.window)
+        && (filters.side === 'all' || position.side === filters.side);
+    }
+
+    function rejectionMatches(rejection, filters) {
+      return (filters.asset === 'all' || rejection.asset === filters.asset)
+        && (filters.window === 'all' || rejection.window === filters.window)
+        && (filters.side === 'all' || rejection.side === filters.side);
+    }
+
+    function filterSpotPoints(points, assetFilter) {
+      if (assetFilter === 'all') {
+        return points;
+      }
+      return points.filter((point) => point.asset === assetFilter);
+    }
+
+    function aggregateTrades(trades, bucketFn) {
+      const buckets = new Map();
+      for (const trade of trades) {
+        const key = bucketFn(trade);
+        if (!buckets.has(key)) {
+          buckets.set(key, []);
+        }
+        buckets.get(key).push(trade);
+      }
+
+      return [...buckets.entries()].map(([label, items]) => {
+        const netPnl = sum(items.map((trade) => trade.pnl));
+        const wins = items.filter((trade) => trade.outcome === 'WIN').length;
+        return {
+          label,
+          trades: items.length,
+          netPnl,
+          avgPnl: items.length > 0 ? netPnl / items.length : 0,
+          winRate: items.length > 0 ? (wins / items.length) * 100 : 0,
+        };
+      });
+    }
+
+    function sortBuckets(buckets, kind) {
+      if (kind === 'window') {
+        const order = ['5m', '15m', '1h', '1d'];
+        return [...buckets].sort((left, right) => order.indexOf(left.label) - order.indexOf(right.label));
+      }
+      return [...buckets].sort((left, right) => left.label.localeCompare(right.label));
+    }
+
+    function groupBy(items, keyFn) {
+      const map = new Map();
+      items.forEach((item) => {
+        const key = keyFn(item);
+        if (!map.has(key)) {
+          map.set(key, []);
+        }
+        map.get(key).push(item);
+      });
+      return map;
+    }
+
+    function lineChart(points, options) {
+      if (!points || points.length === 0) {
+        return emptyState('No chart data.');
+      }
+
+      const width = 960;
+      const height = 260;
+      const minTs = Math.min(...points.map((point) => point.ts));
+      const maxTs = Math.max(...points.map((point) => point.ts));
+      const minValue = Math.min(...points.map((point) => point.value));
+      const maxValue = Math.max(...points.map((point) => point.value));
+      const tsSpan = Math.max(maxTs - minTs, 1);
+      const valueSpan = Math.max(maxValue - minValue, Math.max(Math.abs(maxValue), 1) * 0.05, 1);
+
+      const polyline = points.map((point) => {
+        const x = 24 + ((point.ts - minTs) / tsSpan) * (width - 48);
+        const y = 18 + ((maxValue - point.value) / valueSpan) * (height - 36);
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+      }).join(' ');
+
+      const color = options.color || '#5eead4';
+      return `
+        <div class="chart-card">
+          <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="chartGradient-${Math.random().toString(36).slice(2)}" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="${color}" stop-opacity="0.30"></stop>
+                <stop offset="100%" stop-color="${color}" stop-opacity="0.02"></stop>
+              </linearGradient>
+            </defs>
+            <line x1="24" y1="18" x2="24" y2="${height - 18}" stroke="rgba(148, 163, 184, 0.18)" stroke-width="1"></line>
+            <line x1="24" y1="${height - 18}" x2="${width - 24}" y2="${height - 18}" stroke="rgba(148, 163, 184, 0.18)" stroke-width="1"></line>
+            <polyline fill="none" stroke="${color}" stroke-width="4" points="${polyline}"></polyline>
+            <circle cx="${polyline.split(' ').slice(-1)[0].split(',')[0]}" cy="${polyline.split(' ').slice(-1)[0].split(',')[1]}" r="5" fill="${color}"></circle>
+          </svg>
+          <div class="chart-caption">
+            <span>${escapeHtml(options.captionLeft || 'Start')}</span>
+            <span>${escapeHtml(options.captionCenter || '')}</span>
+            <span>${escapeHtml(options.captionRight || 'End')}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    function sparklineSvg(values, color) {
+      if (!values || values.length === 0) {
+        return '';
+      }
+      const width = 280;
+      const height = 80;
+      const minValue = Math.min(...values);
+      const maxValue = Math.max(...values);
+      const span = Math.max(maxValue - minValue, 1e-6);
+      const points = values.map((value, index) => {
+        const x = (index / Math.max(values.length - 1, 1)) * width;
+        const y = 8 + ((maxValue - value) / span) * (height - 16);
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+      }).join(' ');
+      return `
+        <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+          <polyline fill="none" stroke="${color}" stroke-width="3" points="${points}"></polyline>
+        </svg>
+      `;
+    }
+
+    function sum(values) {
+      return values.reduce((total, value) => total + value, 0);
+    }
+
+    function money(value) {
+      return moneyFormatter.format(value || 0);
+    }
+
+    function number(value) {
+      return numberFormatter.format(value || 0);
+    }
+
+    function pct(value) {
+      return `${pctFormatter.format(value || 0)}%`;
+    }
+
+    function cents(value) {
+      return `${Math.round((value || 0) * 100)}¢`;
+    }
+
+    function minutesLabel(value) {
+      if (value == null) {
+        return '—';
+      }
+      if (value < 0) {
+        return `${Math.abs(value).toFixed(1)}m overdue`;
+      }
+      return `${value.toFixed(1)}m`;
+    }
+
+    function formatTime(value) {
+      if (value == null) {
+        return '—';
+      }
+      if (typeof value === 'string') {
+        const parsed = new Date(value);
+        if (!Number.isNaN(parsed.getTime())) {
+          return parsed.toLocaleString();
+        }
+        return value;
+      }
+      return new Date(value / 1000).toLocaleString();
+    }
+
+    function formatAge(tsMicros) {
+      if (!tsMicros) {
+        return 'unknown age';
+      }
+      const diffMs = Date.now() - tsMicros / 1000;
+      if (diffMs < 1000) return 'just now';
+      if (diffMs < 60_000) return `${Math.round(diffMs / 1000)}s ago`;
+      if (diffMs < 3_600_000) return `${Math.round(diffMs / 60_000)}m ago`;
+      return `${Math.round(diffMs / 3_600_000)}h ago`;
+    }
+
+    function signClass(value) {
+      if (value > 0) return 'positive';
+      if (value < 0) return 'negative';
+      return 'neutral';
+    }
+
+    function emptyState(message) {
+      return `<div class="empty">${escapeHtml(message)}</div>`;
+    }
+
+    function setStatus(message, tone) {
+      const badge = document.getElementById('statusBadge');
+      badge.textContent = message;
+      badge.className = `status ${tone || ''}`.trim();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+  </script>
+</body>
+</html>

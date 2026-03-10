@@ -16,6 +16,7 @@ async fn test_executor_fill_win() {
         best_bid: 0.48,
         best_ask: 0.52,
         ts: 1000000,
+        event_slug: String::new(),
     };
     let best_ask = 0.52;
     let fill = exec.try_fill(&dec, best_ask, 0.48).await;
@@ -37,6 +38,7 @@ async fn test_executor_fill_rejected_price_slipped() {
         best_bid: 0.48,
         best_ask: 0.52,
         ts: 1000000,
+        event_slug: String::new(),
     };
     let fill = exec.try_fill(&dec, 0.90, 0.10).await;
     assert!(fill.is_err());
@@ -57,6 +59,7 @@ async fn test_executor_settle_win() {
         best_bid: 0.48,
         best_ask: 0.52,
         ts: 1000000,
+        event_slug: String::new(),
     };
     let _ = exec.try_fill(&dec, 0.52, 0.48).await;
     let results = exec.settle("mkt-1", Side::Yes, 2000000);
@@ -81,6 +84,7 @@ async fn test_executor_settle_loss() {
         best_bid: 0.48,
         best_ask: 0.52,
         ts: 1000000,
+        event_slug: String::new(),
     };
     let _ = exec.try_fill(&dec, 0.52, 0.48).await;
     let results = exec.settle("mkt-1", Side::No, 2000000);

@@ -15,6 +15,7 @@ pub struct MarketFetcher {
     window_filter: WindowFilter,
     poll_interval: Duration,
     book_refresh: Duration,
+    max_spread: f64,
 }
 
 /// Tracked market state for the fetcher.
@@ -30,6 +31,7 @@ struct TrackedMarket {
     volume_24h: f64,
     market_type: MarketType,
     resolved: bool,
+    event_slug: String,
 }
 
 impl MarketFetcher {
@@ -38,6 +40,7 @@ impl MarketFetcher {
         asset_filter: AssetFilter,
         window_filter: WindowFilter,
         poll_interval_secs: u64,
+        max_spread: f64,
     ) -> Self {
         Self {
             client,
@@ -45,6 +48,7 @@ impl MarketFetcher {
             window_filter,
             poll_interval: Duration::from_secs(poll_interval_secs),
             book_refresh: Duration::from_secs(5),
+            max_spread,
         }
     }
 
@@ -57,6 +61,7 @@ impl MarketFetcher {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
         let mut tracked: HashMap<String, TrackedMarket> = HashMap::new();
+        let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut discovery_tick = time::interval(self.poll_interval);
         let mut book_tick = time::interval(self.book_refresh);
 
@@ -65,7 +70,7 @@ impl MarketFetcher {
         book_tick.tick().await;
 
         // Initial discovery
-        self.discover_markets(&mut tracked, &market_tx_signal, &market_tx_decision, &db_tx)
+        self.discover_markets(&mut tracked, &mut skipped, &market_tx_signal, &market_tx_decision, &db_tx)
             .await;
 
         loop {
@@ -78,7 +83,7 @@ impl MarketFetcher {
                 }
 
                 _ = discovery_tick.tick() => {
-                    self.discover_markets(&mut tracked, &market_tx_signal, &market_tx_decision, &db_tx).await;
+                    self.discover_markets(&mut tracked, &mut skipped, &market_tx_signal, &market_tx_decision, &db_tx).await;
                     self.check_resolutions(&mut tracked, &settle_tx, &db_tx).await;
                 }
 
@@ -92,6 +97,7 @@ impl MarketFetcher {
     async fn discover_markets(
         &self,
         tracked: &mut HashMap<String, TrackedMarket>,
+        skipped: &mut std::collections::HashSet<String>,
         market_tx_signal: &mpsc::Sender<MarketState>,
         market_tx_decision: &mpsc::Sender<MarketState>,
         db_tx: &mpsc::Sender<DbEvent>,
@@ -113,8 +119,8 @@ impl MarketFetcher {
                 _ => continue,
             };
 
-            // Skip already-tracked markets
-            if tracked.contains_key(condition_id) {
+            // Skip already-tracked or previously-skipped markets
+            if tracked.contains_key(condition_id) || skipped.contains(condition_id) {
                 continue;
             }
 
@@ -167,8 +173,8 @@ impl MarketFetcher {
                 }
             };
 
-            // Skip illiquid markets (spread > 10% or no real order book)
-            if book.spread > 0.10
+            // Skip illiquid markets (spread exceeds configured max or no real order book)
+            if book.spread > self.max_spread
                 || (book.best_bid < f64::EPSILON
                     && book.best_ask > 1.0 - f64::EPSILON)
             {
@@ -235,14 +241,18 @@ impl MarketFetcher {
                     None => {
                         tracing::warn!(
                             market_id = %market_id,
+                            slug = ?gm.slug,
                             "failed to parse open_ts from slug, skipping market"
                         );
+                        skipped.insert(condition_id.to_string());
                         continue;
                     }
                 }
             } else {
                 now
             };
+
+            let event_slug = gm.event_slug.clone().unwrap_or_default();
 
             let ms = MarketState {
                 market_id: market_id.clone(),
@@ -258,6 +268,7 @@ impl MarketFetcher {
                 open_price,
                 volume_24h: volume,
                 market_type,
+                event_slug: event_slug.clone(),
             };
 
             let _ = market_tx_signal.send(ms.clone()).await;
@@ -278,6 +289,7 @@ impl MarketFetcher {
                     volume_24h: volume,
                     market_type,
                     resolved: false,
+                    event_slug,
                 },
             );
 
@@ -320,6 +332,7 @@ impl MarketFetcher {
                 open_price: tm.open_price,
                 volume_24h: tm.volume_24h,
                 market_type: tm.market_type,
+                event_slug: tm.event_slug.clone(),
             };
 
             let _ = market_tx_decision.send(ms).await;
@@ -355,24 +368,27 @@ impl MarketFetcher {
         }
 
         for cid in to_resolve {
-            let resolved_side = match self.client.fetch_market_by_id(&cid).await {
-                Ok(Some(gm)) if gm.closed.unwrap_or(false) => {
-                    if let Some(side) = determine_outcome(&gm) {
+            let resolved_side = match self.client.fetch_market_for_resolution(&cid).await {
+                Ok(Some(cm)) => {
+                    // Use the authoritative `winner` flag from CLOB API tokens
+                    if let Some(side) = determine_outcome_from_clob(&cm) {
                         side
                     } else {
-                        tracing::warn!(
+                        // Market exists but no winner yet — retry next cycle
+                        tracing::debug!(
                             condition_id = %cid,
-                            "cannot determine outcome from API response, skipping settlement"
+                            tokens = ?cm.tokens,
+                            "no winner flag set yet, deferring settlement"
                         );
                         continue;
                     }
                 }
-                Ok(Some(_)) => {
-                    // Past resolution time but not closed yet — check again later
+                Ok(None) => {
+                    tracing::debug!(condition_id = %cid, "CLOB market not found");
                     continue;
                 }
-                _ => {
-                    // API error or not found — skip
+                Err(e) => {
+                    tracing::warn!(condition_id = %cid, error = %e, "CLOB resolution fetch failed");
                     continue;
                 }
             };
@@ -591,24 +607,101 @@ fn extract_dollar_amounts(text: &str) -> Vec<f64> {
     amounts
 }
 
-fn determine_outcome(gm: &crate::polymarket::types::GammaMarket) -> Option<Side> {
-    // outcomePrices is typically "[1.0, 0.0]" for YES or "[0.0, 1.0]" for NO
-    if let Some(prices_str) = &gm.outcome_prices {
-        if let Ok(prices) = serde_json::from_str::<Vec<String>>(prices_str) {
-            if let Some(yes_price) = prices.first().and_then(|p| p.parse::<f64>().ok()) {
-                return Some(if yes_price > 0.5 { Side::Yes } else { Side::No });
-            }
-        }
-    }
-    // Fallback: check token prices
-    if let Some(tokens) = &gm.tokens {
-        for t in tokens {
-            if matches!(t.outcome.as_deref(), Some("Yes" | "Up")) {
-                if let Some(price) = t.price {
-                    return Some(if price > 0.5 { Side::Yes } else { Side::No });
+/// Determine which side won using the CLOB API's authoritative `winner` flag.
+fn determine_outcome_from_clob(cm: &crate::polymarket::types::ClobMarket) -> Option<Side> {
+    let tokens = cm.tokens.as_ref()?;
+    for t in tokens {
+        if t.winner == Some(true) {
+            let outcome = t.outcome.as_deref().unwrap_or("");
+            let side = match outcome {
+                "Yes" | "Up" => Side::Yes,
+                "No" | "Down" => Side::No,
+                _ => {
+                    tracing::warn!(
+                        outcome = outcome,
+                        "unknown winning outcome label"
+                    );
+                    continue;
                 }
-            }
+            };
+            return Some(side);
         }
     }
+    // No token has winner=true yet
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::polymarket::types::{ClobMarket, ClobToken};
+
+    fn make_clob_market(tokens: Vec<ClobToken>) -> ClobMarket {
+        ClobMarket {
+            tokens: Some(tokens),
+        }
+    }
+
+    fn token(outcome: &str, winner: Option<bool>) -> ClobToken {
+        ClobToken {
+            outcome: Some(outcome.into()),
+            winner,
+        }
+    }
+
+    // --- winner flag tests (CLOB API) ---
+
+    #[test]
+    fn clob_up_wins() {
+        let cm = make_clob_market(vec![token("Up", Some(true)), token("Down", Some(false))]);
+        assert_eq!(determine_outcome_from_clob(&cm), Some(Side::Yes));
+    }
+
+    #[test]
+    fn clob_down_wins() {
+        let cm = make_clob_market(vec![token("Up", Some(false)), token("Down", Some(true))]);
+        assert_eq!(determine_outcome_from_clob(&cm), Some(Side::No));
+    }
+
+    #[test]
+    fn clob_yes_wins() {
+        let cm = make_clob_market(vec![token("Yes", Some(true)), token("No", Some(false))]);
+        assert_eq!(determine_outcome_from_clob(&cm), Some(Side::Yes));
+    }
+
+    #[test]
+    fn clob_no_wins() {
+        let cm = make_clob_market(vec![token("Yes", Some(false)), token("No", Some(true))]);
+        assert_eq!(determine_outcome_from_clob(&cm), Some(Side::No));
+    }
+
+    #[test]
+    fn clob_reversed_order_up_wins() {
+        // Tokens in reversed order — still works because we check by name
+        let cm = make_clob_market(vec![token("Down", Some(false)), token("Up", Some(true))]);
+        assert_eq!(determine_outcome_from_clob(&cm), Some(Side::Yes));
+    }
+
+    #[test]
+    fn clob_no_winner_yet() {
+        // No winner flag set — should return None (retry later)
+        let cm = make_clob_market(vec![token("Up", None), token("Down", None)]);
+        assert_eq!(determine_outcome_from_clob(&cm), None);
+    }
+
+    #[test]
+    fn clob_no_winner_false_both() {
+        // Both false — market resolved but no winner? Return None
+        let cm =
+            make_clob_market(vec![token("Up", Some(false)), token("Down", Some(false))]);
+        assert_eq!(determine_outcome_from_clob(&cm), None);
+    }
+
+    #[test]
+    fn clob_no_tokens() {
+        let cm = ClobMarket {
+            tokens: None,
+        };
+        assert_eq!(determine_outcome_from_clob(&cm), None);
+    }
 }

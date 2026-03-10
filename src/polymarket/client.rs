@@ -136,22 +136,30 @@ impl PolymarketClient {
         let events: Vec<GammaEvent> = resp.json().await?;
         Ok(events
             .into_iter()
-            .flat_map(|e| e.markets.unwrap_or_default())
+            .flat_map(|e| {
+                let event_slug = e.slug.clone().unwrap_or_default();
+                e.markets.unwrap_or_default().into_iter().map(move |mut m| {
+                    m.event_slug = Some(event_slug.clone());
+                    m
+                })
+            })
             .collect())
     }
 
-    /// Fetch a specific market by condition ID to check resolution status.
-    pub async fn fetch_market_by_id(
+    /// Fetch a market from the CLOB API to check resolution status.
+    /// Uses `GET /markets/{condition_id}` which returns `tokens[].winner`
+    /// — the authoritative resolution signal.
+    pub async fn fetch_market_for_resolution(
         &self,
         condition_id: &str,
-    ) -> Result<Option<GammaMarket>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/markets?condition_id={condition_id}", self.gamma_url);
+    ) -> Result<Option<ClobMarket>, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!("{}/markets/{condition_id}", self.clob_url);
         let resp = self.http.get(&url).send().await?;
         if !resp.status().is_success() {
             return Ok(None);
         }
-        let mut markets: Vec<GammaMarket> = resp.json().await?;
-        Ok(markets.pop())
+        let market: ClobMarket = resp.json().await?;
+        Ok(Some(market))
     }
 
     // -----------------------------------------------------------------------

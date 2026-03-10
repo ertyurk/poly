@@ -184,13 +184,15 @@ impl AssetTracker {
     }
 
     /// Restore state from a previous session to avoid cold-start warm-up.
+    /// Drift is reset to zero — it's directional and goes stale between sessions.
+    /// Vol and tick count are structural and worth preserving.
     pub fn restore(
         last_price: f64,
         last_ts: TsMicros,
         valid_ticks: u32,
         variance: f64,
-        drift: f64,
-        slow_drift: f64,
+        _drift: f64,
+        _slow_drift: f64,
         lambda: f64,
     ) -> Self {
         let slow_lambda = lambda / SLOW_DRIFT_FACTOR;
@@ -199,8 +201,8 @@ impl AssetTracker {
             last_ts,
             valid_ticks,
             variance,
-            drift,
-            slow_drift,
+            drift: 0.0,
+            slow_drift: 0.0,
             lambda,
             slow_lambda,
         }
@@ -398,22 +400,19 @@ impl SignalActor {
                         let fast_agrees = (drift > 0.0) == signal_says_up;
                         let slow_agrees = (slow_drift > 0.0) == signal_says_up;
                         if !fast_agrees || !slow_agrees {
+                            tracing::debug!(
+                                market = %market_id,
+                                p_hat = format_args!("{p_hat:.4}"),
+                                drift = format_args!("{drift:.2e}"),
+                                slow_drift = format_args!("{slow_drift:.2e}"),
+                                fast_agrees,
+                                slow_agrees,
+                                "signal blocked by drift alignment"
+                            );
                             continue;
                         }
 
-                        // NO-only for UpDown markets: empirical results across
-                        // 39 trades show NO=19/19 (100%) vs YES=0/20 (0%).
-                        // Short-term crypto UpDown markets have structural
-                        // NO bias: random walk + mean reversion + bid-ask
-                        // bounce make "stay near/below open" more likely than
-                        // "sustained move above open" in 5–60 min windows.
-                        // YES bets are disabled until the model can reliably
-                        // distinguish genuine breakouts from noise bounces.
-                        if signal_says_up
-                            && matches!(meta.market_type, MarketType::UpDown)
-                        {
-                            continue;
-                        }
+
 
                         let confidence = (p_hat - 0.5).abs() * 2.0;
 
@@ -426,6 +425,13 @@ impl SignalActor {
                             ts: spot.ts,
                         };
 
+                        tracing::debug!(
+                            market = %market_id,
+                            p_hat = format_args!("{p_hat:.4}"),
+                            confidence = format_args!("{confidence:.4}"),
+                            drift = format_args!("{drift:.2e}"),
+                            "signal emitted"
+                        );
                         let _ = db_tx.try_send(DbEvent::Signal(sig.clone()));
                         let _ = signal_tx.try_send(sig);
                     }

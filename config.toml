@@ -46,12 +46,20 @@ liquidity_b = 100000.0
 # Hard cap: maximum fraction of bankroll risked per single trade.
 # 0.10 = no trade can exceed 10% of current bankroll.
 # Prevents catastrophic loss from a single bad bet.
+# 0.05 → $3 max (will use $5 floor)
+# 0.10 → $6 max (~10-12 shares)
+# 0.15 → $9 max (~15-18 shares)
 max_bet_fraction = 0.10
 
 # Maximum fraction of bankroll committed across ALL open positions.
 # 0.50 = max 50% of bankroll at risk simultaneously.
 # Prevents over-commitment when many markets are discovered at once.
 max_total_exposure = 0.50
+
+# Maximum bid-ask spread (in price units) to accept when discovering markets.
+# Markets wider than this are skipped as illiquid. Tighter = better fills.
+# 0.03 = 3¢ (tight, fewer markets), 0.05 = 5¢ (moderate), 0.10 = 10¢ (loose)
+max_spread = 0.03
 
 [strategy.decay]
 # Exponential decay rates (lambda) for each signal source.

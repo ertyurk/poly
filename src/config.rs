@@ -38,6 +38,11 @@ pub struct Strategy {
     /// Maximum fraction of bankroll committed across ALL open positions.
     /// 0.50 = max 50% of bankroll at risk at any time.
     pub max_total_exposure: f64,
+    /// Maximum bid-ask spread to accept when discovering markets.
+    /// Markets wider than this are skipped as illiquid.
+    /// 0.03 = 3¢ spread (tight), 0.10 = 10¢ (loose).
+    #[serde(default = "default_max_spread")]
+    pub max_spread: f64,
     pub decay: Decay,
 }
 
@@ -86,6 +91,10 @@ pub struct Telegram {
 
 const fn default_summary_interval() -> u64 {
     30
+}
+
+fn default_max_spread() -> f64 {
+    0.03
 }
 
 impl Config {

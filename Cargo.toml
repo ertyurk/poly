@@ -2,6 +2,7 @@
 name = "polymarket-bot"
 version = "0.2.0"
 edition = "2021"
+default-run = "polymarket-bot"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -21,6 +22,10 @@ dotenvy = "0.15"
 
 # Polymarket API client (public endpoints)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
 
 # Polymarket official SDK (authenticated trading)
 polymarket-client-sdk = { version = "0.4", features = ["clob"] }

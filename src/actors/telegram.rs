@@ -258,13 +258,21 @@ impl TelegramActor {
 fn format_alert(alert: &TelegramAlert) -> String {
     match alert {
         TelegramAlert::TradeFilled { decision, fill_price } => {
+            let link = if decision.event_slug.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n[View on Polymarket](https://polymarket.com/event/{})",
+                    decision.event_slug
+                )
+            };
             format!(
                 "\u{1f4c8} *Trade Filled*\n\
                  Market: `{}`\n\
                  Side: *{}*\n\
                  Size: ${:.2}\n\
                  Fill price: {:.4}\n\
-                 Edge: {:.2}%",
+                 Edge: {:.2}%{link}",
                 decision.market_id,
                 decision.side,
                 decision.size_usd,
@@ -277,6 +285,14 @@ fn format_alert(alert: &TelegramAlert) -> String {
                 Outcome::Win => "\u{2705}",
                 Outcome::Loss => "\u{274c}",
             };
+            let link = if tr.event_slug.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n[View on Polymarket](https://polymarket.com/event/{})",
+                    tr.event_slug
+                )
+            };
             format!(
                 "{icon} *Trade Settled*\n\
                  Market: `{}`\n\
@@ -284,7 +300,7 @@ fn format_alert(alert: &TelegramAlert) -> String {
                  Size: ${:.2} @ {:.4}\n\
                  P&L: *{:+.2}*\n\
                  Fees: ${:.4}\n\
-                 Bankroll: ${:.2}",
+                 Bankroll: ${:.2}{link}",
                 tr.market_id,
                 tr.side,
                 tr.outcome,

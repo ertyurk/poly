@@ -242,6 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.asset.clone(),
         cli.window.clone(),
         config.polymarket.poll_interval_secs,
+        config.strategy.max_spread,
     );
     let fetcher_shutdown = shutdown_rx.clone();
     let fetcher_db_tx = db_tx.clone();

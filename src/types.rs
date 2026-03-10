@@ -151,6 +151,7 @@ pub struct MarketState {
     pub open_price: Option<f64>,
     pub volume_24h: f64,
     pub market_type: MarketType,
+    pub event_slug: String,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +178,7 @@ pub struct TradeDecision {
     pub best_bid: f64,
     pub best_ask: f64,
     pub ts: TsMicros,
+    pub event_slug: String,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +209,7 @@ pub struct TradeResult {
     pub resolved_ts: TsMicros,
     /// Estimated slippage applied in paper mode (0.0 in live mode).
     pub estimated_slippage: f64,
+    pub event_slug: String,
 }
 
 /// Command to settle a resolved market.
