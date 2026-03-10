@@ -13,29 +13,6 @@ fn test_lmsr_effective_spread() {
 }
 
 #[test]
-fn test_bayesian_probability_from_return() {
-    let p = polymarket_bot::math::bayesian::probability_from_return(0.001, 0.005);
-    assert!(p > 0.5);
-    let p = polymarket_bot::math::bayesian::probability_from_return(-0.001, 0.005);
-    assert!(p < 0.5);
-}
-
-#[test]
-fn test_bayesian_normalize_binary() {
-    let (p_up, p_down) = polymarket_bot::math::bayesian::normalize_binary(0.0, 0.0);
-    assert_relative_eq!(p_up, 0.5, epsilon = 1e-10);
-    assert_relative_eq!(p_down, 0.5, epsilon = 1e-10);
-    assert_relative_eq!(p_up + p_down, 1.0, epsilon = 1e-10);
-}
-
-#[test]
-fn test_bayesian_normalize_binary_skewed() {
-    let (p_up, p_down) = polymarket_bot::math::bayesian::normalize_binary(1.0, 0.0);
-    assert!(p_up > p_down);
-    assert_relative_eq!(p_up + p_down, 1.0, epsilon = 1e-10);
-}
-
-#[test]
 fn test_full_kelly_even_odds() {
     let f = polymarket_bot::math::kelly::full_kelly(0.60, 0.50);
     assert_relative_eq!(f, 0.20, epsilon = 1e-10);
@@ -65,21 +42,3 @@ fn test_position_size() {
     assert_relative_eq!(size, 10_000.0, epsilon = 1.0);
 }
 
-#[test]
-fn test_decay_weight_at_zero() {
-    let w = polymarket_bot::math::decay::weight(0.00230, 0.0);
-    assert_relative_eq!(w, 1.0, epsilon = 1e-10);
-}
-
-#[test]
-fn test_decay_weight_at_half_life() {
-    let half_life = (2.0_f64).ln() / 0.00230;
-    let w = polymarket_bot::math::decay::weight(0.00230, half_life);
-    assert_relative_eq!(w, 0.5, epsilon = 1e-3);
-}
-
-#[test]
-fn test_decay_weight_at_one_hour() {
-    let w = polymarket_bot::math::decay::weight(0.00230, 3600.0);
-    assert!(w < 0.001);
-}

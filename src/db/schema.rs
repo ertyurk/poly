@@ -24,6 +24,21 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         tracing::info!("migrated: added signal_state.slow_drift");
     }
 
+    // Migration: create open_positions table
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS open_positions (
+            decision_id INTEGER NOT NULL,
+            market_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            size REAL NOT NULL,
+            fee_rate REAL NOT NULL,
+            entry_ts INTEGER NOT NULL,
+            estimated_slippage REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (market_id)
+        );",
+    )?;
+
     Ok(())
 }
 

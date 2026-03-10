@@ -4,6 +4,14 @@ use crate::types::*;
 /// Maximum price slippage tolerance (fraction) before rejecting a fill.
 const MAX_SLIPPAGE: f64 = 0.10;
 
+/// Details returned by a successful fill.
+#[derive(Debug, Clone)]
+pub struct FillResult {
+    pub decision_id: i64,
+    pub fill_price: f64,
+    pub estimated_slippage: f64,
+}
+
 /// Estimate slippage for paper trading based on order size and spread.
 ///
 /// Model: slippage = half_spread + size_impact
@@ -74,6 +82,38 @@ impl Executor {
         }
     }
 
+    /// Restore an open position from a previous session.
+    pub fn restore_position(
+        &mut self,
+        decision_id: i64,
+        market_id: String,
+        side: Side,
+        entry_price: f64,
+        size: f64,
+        fee_rate: f64,
+        entry_ts: TsMicros,
+        estimated_slippage: f64,
+    ) {
+        self.positions.push(OpenPosition {
+            decision_id,
+            market_id,
+            side,
+            entry_price,
+            size,
+            fee_rate,
+            entry_ts,
+            estimated_slippage,
+        });
+        if decision_id >= self.next_decision_id {
+            self.next_decision_id = decision_id + 1;
+        }
+    }
+
+    /// Set the next decision ID (for restoring from DB).
+    pub fn set_next_decision_id(&mut self, id: i64) {
+        self.next_decision_id = id;
+    }
+
     #[allow(dead_code)]
     pub const fn mode(&self) -> Mode {
         self.mode
@@ -100,7 +140,7 @@ impl Executor {
         dec: &TradeDecision,
         best_ask: f64,
         best_bid: f64,
-    ) -> Option<i64> {
+    ) -> Option<FillResult> {
         // Only one position per market
         if self.positions.iter().any(|p| p.market_id == dec.market_id) {
             return None;
@@ -237,7 +277,11 @@ impl Executor {
             estimated_slippage: slippage,
         });
 
-        Some(id)
+        Some(FillResult {
+            decision_id: id,
+            fill_price,
+            estimated_slippage: slippage,
+        })
     }
 
     /// Settle all positions for a resolved market.

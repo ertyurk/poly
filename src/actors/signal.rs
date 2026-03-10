@@ -1,17 +1,13 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::math::{bayesian, decay};
 use crate::types::*;
 
 /// Minimum fraction of window elapsed before emitting signals.
 /// At 50% elapsed: enough data for directional signal with less time
 /// for reversals. Market may still have edge available.
 const MIN_ELAPSED_PCT: f64 = 0.50;
-
-/// Maximum number of observations to retain per market window.
-const MAX_OBSERVATIONS: usize = 300;
 
 /// Initial per-second volatility estimate (~2.5% daily for BTC).
 const INITIAL_VOL: f64 = 0.00008;
@@ -21,12 +17,6 @@ const MIN_VOL: f64 = 0.00002;
 
 /// Minimum valid updates before emitting signals (~30 seconds of data).
 const MIN_TICKS: u32 = 30;
-
-/// Minimum valid ticks before the slow drift is considered reliable.
-/// During warm-up (< MIN_TICKS_TREND ticks), only NO signals are
-/// allowed — the safer default in short-term volatile crypto markets.
-/// At ~1 tick/sec: 300 ticks ≈ 5 minutes of price data.
-const MIN_TICKS_TREND: u32 = 300;
 
 /// Safety margin on realized volatility to prevent overconfidence.
 /// EWM variance from noisy tick data tends to underestimate true vol;
@@ -227,77 +217,6 @@ impl AssetTracker {
             self.slow_drift,
             self.lambda,
         )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MarketWindow — Bayesian momentum accumulator for UpDown markets
-// ---------------------------------------------------------------------------
-
-/// Tracks Bayesian state for one market window.
-///
-/// Accumulates decay-weighted log-likelihood ratios from consecutive price
-/// observations, building conviction in a directional trend. Well-suited for
-/// "Up or Down" markets where the question is about directional momentum.
-pub struct MarketWindow {
-    lambda: f64,
-    observations: VecDeque<(f64, f64)>, // (log_likelihood_ratio, elapsed_secs)
-    count: u32,
-}
-
-impl MarketWindow {
-    pub fn new(lambda: f64) -> Self {
-        Self {
-            lambda,
-            observations: VecDeque::with_capacity(MAX_OBSERVATIONS),
-            count: 0,
-        }
-    }
-
-    /// Update with a new price observation.
-    /// `ret` = price return since window open.
-    /// `vol` = estimated volatility at this timescale.
-    /// `elapsed` = seconds since window opened.
-    pub fn update(&mut self, ret: f64, vol: f64, elapsed: f64) {
-        let p_up = bayesian::probability_from_return(ret, vol).clamp(1e-10, 1.0 - 1e-10);
-        let p_down = 1.0 - p_up;
-
-        let ll_ratio = p_up.ln() - p_down.ln();
-        self.observations.push_back((ll_ratio, elapsed));
-        self.count += 1;
-
-        if self.observations.len() > MAX_OBSERVATIONS {
-            self.observations.pop_front();
-        }
-    }
-
-    /// Current probability estimate for UP, using decay-weighted observations.
-    pub fn p_hat(&self) -> f64 {
-        if self.observations.is_empty() {
-            return 0.5;
-        }
-
-        let latest_time = self.observations.back().map_or(0.0, |o| o.1);
-        let mut weighted_ll_sum = 0.0;
-
-        for &(ll_ratio, obs_time) in &self.observations {
-            let age = (latest_time - obs_time).max(0.0);
-            let w = decay::weight(self.lambda, age);
-            weighted_ll_sum += w * ll_ratio;
-        }
-
-        let (p_up, _) = bayesian::normalize_binary(weighted_ll_sum, 0.0);
-        p_up
-    }
-
-    #[inline]
-    pub fn confidence(&self) -> f64 {
-        (self.p_hat() - 0.5).abs() * 2.0
-    }
-
-    #[inline]
-    pub const fn n_observations(&self) -> u32 {
-        self.count
     }
 }
 

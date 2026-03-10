@@ -42,15 +42,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Load config
     let config = config::Config::load(&cli.config)?;
 
-    // 5. Apply CLI overrides
-    let bankroll = cli.bankroll.unwrap_or(config.bankroll.initial);
+    // 5. Apply CLI overrides + restore bankroll from DB if available
     let paper_trade = cli.paper_trade;
     let mode_str = if paper_trade { "paper" } else { "real" };
 
-    tracing::info!(mode = mode_str, bankroll = bankroll, "loaded config");
-
     // 6. Create data/ directory if needed
     std::fs::create_dir_all("data").ok();
+
+    // 6b. Restore bankroll from last trade (if any), otherwise use config/CLI
+    let startup_conn = db::init(&config.general.db_path)?;
+    let bankroll = if let Some(b) = cli.bankroll {
+        b // explicit CLI override wins
+    } else if let Ok(Some(last)) = db::queries::last_bankroll(&startup_conn) {
+        tracing::info!(bankroll = format_args!("${last:.2}"), "restored bankroll from DB");
+        last
+    } else {
+        config.bankroll.initial
+    };
+    let restored_positions = db::queries::load_open_positions(&startup_conn).unwrap_or_default();
+    let next_decision_id = db::queries::max_decision_id(&startup_conn).unwrap_or(0) + 1;
+    drop(startup_conn);
+
+    tracing::info!(mode = mode_str, bankroll = format_args!("${bankroll:.2}"), "loaded config");
 
     // 7. Build Polymarket client for order execution (live mode only)
     let exec_client: Option<PolymarketClient> = if paper_trade {
@@ -290,6 +303,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let exec_mode = if paper_trade { Mode::Paper } else { Mode::Live };
         let mut executor =
             Executor::new(exec_mode, bankroll, exec_client, config.strategy.max_total_exposure);
+        executor.set_next_decision_id(next_decision_id);
+
+        // Restore open positions from previous session
+        for pos in &restored_positions {
+            let side = match pos.side.as_str() {
+                "YES" => Side::Yes,
+                _ => Side::No,
+            };
+            executor.restore_position(
+                pos.decision_id,
+                pos.market_id.clone(),
+                side,
+                pos.entry_price,
+                pos.size,
+                pos.fee_rate,
+                pos.entry_ts,
+                pos.estimated_slippage,
+            );
+            tracing::info!(
+                market = %pos.market_id,
+                side = %pos.side,
+                size = format_args!("${:.2}", pos.size),
+                price = format_args!("{:.4}", pos.entry_price),
+                "restored open position"
+            );
+        }
 
         let mut trades_placed: u32 = 0;
         let mut trades_skipped: u32 = 0;
@@ -313,14 +352,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(DecisionOutput::Trade(dec)) => {
                             let best_ask = dec.price;
                             let best_bid = dec.price;
-                            if executor.try_fill(&dec, best_ask, best_bid).await.is_some() {
+                            if let Some(fill) = executor.try_fill(&dec, best_ask, best_bid).await {
                                 trades_placed += 1;
                                 if let Some(ref stats) = exec_tg_stats {
                                     stats.record_fill();
                                 }
                                 if let Some(ref tg) = telegram_tx {
-                                    let _ = tg.try_send(TelegramAlert::TradeFilled(dec.clone()));
+                                    let _ = tg.try_send(TelegramAlert::TradeFilled {
+                                        decision: dec.clone(),
+                                        fill_price: fill.fill_price,
+                                    });
                                 }
+                                let _ = exec_db_tx.try_send(DbEvent::SaveOpenPosition {
+                                    decision_id: fill.decision_id,
+                                    market_id: dec.market_id.clone(),
+                                    side: dec.side,
+                                    entry_price: fill.fill_price,
+                                    size: dec.size,
+                                    fee_rate: dec.fee_rate,
+                                    entry_ts: dec.ts,
+                                    estimated_slippage: fill.estimated_slippage,
+                                });
                                 let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
                             }
                         }
@@ -335,6 +387,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 msg = settle_rx.recv() => {
                     if let Some(cmd) = msg {
                         markets_resolved += 1;
+                        let _ = exec_db_tx.try_send(DbEvent::ClearOpenPositions {
+                            market_id: cmd.market_id.clone(),
+                        });
                         let results = executor.settle(&cmd.market_id, cmd.resolved_side, cmd.resolved_ts);
 
                         for tr in &results {
@@ -369,6 +424,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Drain remaining settle commands
                     while let Ok(cmd) = settle_rx.try_recv() {
                         markets_resolved += 1;
+                        let _ = exec_db_tx.try_send(DbEvent::ClearOpenPositions {
+                            market_id: cmd.market_id.clone(),
+                        });
                         let results = executor.settle(&cmd.market_id, cmd.resolved_side, cmd.resolved_ts);
                         for tr in &results {
                             match tr.outcome {

@@ -1,6 +1,6 @@
 # polymarket-bot
 
-Trading bot for [Polymarket](https://polymarket.com) crypto prediction markets. Connects to Binance for real-time spot prices and Polymarket for real market data, order books, and trade execution. Uses Bayesian signal processing, LMSR pricing, and Kelly-criterion position sizing.
+Trading bot for [Polymarket](https://polymarket.com) crypto prediction markets. Connects to Binance for real-time spot prices and Polymarket for real market data, order books, and trade execution. Uses a log-normal probability model, LMSR pricing, and Kelly-criterion position sizing.
 
 Supports **paper trading** (real data, simulated execution) and **live trading** (real orders via Polymarket CLOB API with EIP-712 signing).
 
@@ -45,10 +45,12 @@ Both modes use **identical data pipelines** — the only difference is order exe
 | Polymarket market discovery (Gamma API) | Real | Real |
 | Order books (CLOB API, refreshed every 5s) | Real | Real |
 | Binance spot prices (WebSocket) | Real | Real |
-| Bayesian signal processing | Real | Real |
+| Log-normal signal model | Real | Real |
 | Decision engine (edge, fees, sizing) | Real | Real |
 | Market resolution detection | Real | Real |
-| **Order execution** | **Simulated locally** | **CLOB API `POST /order`** |
+| Position & bankroll persistence | Real | Real |
+| Telegram notifications | Real | Real |
+| **Order execution** | **Simulated (with slippage)** | **CLOB API `POST /order`** |
 | API keys required | No | Yes |
 
 Paper mode gives you accurate P&L tracking against real market conditions without risking capital.
@@ -103,37 +105,40 @@ See `.env.example` for a template.
 
 ```
 Binance WS ──► Ingest ──► Signal Engine ──► Decision Engine ──► Executor
-  (spot prices)              (Bayesian)       (edge/sizing)     (paper or live)
+  (spot prices)            (log-normal)       (edge/sizing)     (paper or live)
                                                                       │
 Polymarket ──► Market Fetcher ──► Signal + Decision                   │
-  (Gamma API)   (real markets,      (real prices,                     │
-  (CLOB API)     order books)        real fees)                       │
-                                                                      ▼
-                                                               SQLite Writer
-                                                             (batched, WAL mode)
+  (Gamma API)   (real markets,      (real prices,                     ▼
+  (CLOB API)     order books)        real fees)              ┌──► Telegram
+                                                             │   (alerts + summaries)
+                                                             ▼
+                                                        SQLite Writer
+                                                      (batched, WAL mode)
 ```
 
-**Six actors** run as async tokio tasks, connected by `mpsc` channels:
+**Seven actors** run as async tokio tasks, connected by `mpsc` channels:
 
 | Actor | Role |
 |---|---|
 | **Ingest** | Binance WebSocket for real-time BTC/ETH trades. Reconnects with exponential backoff. |
-| **Market Fetcher** | Polls Polymarket Gamma API for crypto prediction markets. Fetches real order books from CLOB API every 5s. Detects market resolution. |
-| **Signal** | Per-market Bayesian state. Computes `p_hat` (probability of UP) using decay-weighted log-likelihood ratios. |
-| **Decision** | Edge gating: edge must exceed fees + spread. Sizes with half-Kelly capped by LMSR optimal size and stealth constraint (2% of 24h volume). |
-| **Executor** | Paper mode: simulates fills at real prices. Live mode: places EIP-712 signed orders on Polymarket CLOB API. |
-| **Writer** | Batched SQLite writer. Flushes every 100 events or 500ms. |
+| **Market Fetcher** | Polls Polymarket Gamma API for crypto prediction markets. Fetches real order books from CLOB API every 5s. Detects market resolution. Parses market type (Above/Below/Between/UpDown) from question text. |
+| **Signal** | Per-asset `AssetTracker` estimates realized volatility and drift from Binance ticks (EWM with dual-timescale drift). Computes `p_hat = P(S_T > K)` via log-normal CDF per `MarketType`. Requires 30+ ticks warm-up. |
+| **Decision** | Edge gating: edge must exceed fees. Sizes with quarter-Kelly. Per-trade cap 10% of bankroll, total exposure cap 50%. |
+| **Executor** | Paper mode: simulates fills with slippage model. Live mode: places EIP-712 signed orders. Positions persist across restarts. |
+| **Writer** | Batched SQLite writer. Flushes every 100 events or 500ms. Fire-and-forget channel. |
+| **Telegram** | Trade fill + settlement alerts. Periodic and shutdown summaries. Rate-limited (1 msg/sec). |
 
 ## Key math
 
 | Concept | Formula | Source |
 |---|---|---|
+| Log-normal CDF | `p_hat = Φ((ln(S/K) + μT) / (σ√T))` | Black-Scholes-style |
+| EWM variance | `σ² += λ(r² - σ²)` with dual-timescale drift (fast ~5min, slow ~20min) | Exponential moving avg |
 | LMSR cost | `C(q) = b * ln(Σ e^(q_i/b))` | Hanson 2003 |
-| Bayesian update | `log P(UP\|D) = log P(UP) + Σ log P(D_k\|UP)` | Sequential log-space |
-| Signal decay | `w_k = exp(-λ * (t - t_k))`, λ = 0.00230 (5-min half-life) | Exponential weighting |
-| Half-Kelly | `f = (p_hat - p) / 2(1 - p)` | Kelly criterion / 2 |
-| Entry gate | `\|edge\| > τ_min + p(1-p)/b * δ_min` | Edge must clear fees + spread |
+| Quarter-Kelly | `f = kelly_fraction * (p_hat - p) / (1 - p)` | Kelly criterion / 4 |
+| Entry gate | `effective_edge = \|p_hat - market_price\| - fee_rate` | Edge must clear fees |
 | Stealth cap | `size ≤ 0.02 * volume_24h` | Avoid moving the market |
+| Paper slippage | `slippage = spread/2 + size/(size + $50k) * 0.02` | Linear impact model |
 
 ## Configuration
 
@@ -142,25 +147,37 @@ All settings in [`config.toml`](config.toml) with inline documentation. Key sect
 | Section | Controls |
 |---|---|
 | `[bankroll]` | Starting bankroll (USD) |
-| `[strategy]` | Edge threshold, Kelly fraction, volume cap, confidence floor, LMSR liquidity |
-| `[strategy.decay]` | Exponential decay rates for signal sources |
+| `[strategy]` | Edge threshold, Kelly fraction, volume cap, confidence floor, LMSR liquidity, max exposure |
 | `[binance]` | WebSocket URL and trade streams |
 | `[polymarket]` | CLOB, Gamma API endpoints; polling intervals |
 | `[writer]` | SQLite batch size and flush interval |
+| `[telegram]` | Bot token, chat ID, summary interval (optional) |
 
 ## Database
 
-SQLite with WAL mode, `synchronous = NORMAL`, foreign keys enabled. Seven tables:
+SQLite with WAL mode, `synchronous = NORMAL`, foreign keys enabled. Idempotent schema migrations on startup. Ten tables:
 
 | Table | Contents |
 |---|---|
 | `spot_prices` | Every Binance trade tick |
-| `markets` | Discovered Polymarket markets |
+| `markets` | Discovered Polymarket markets (with resolution tracking) |
 | `book_snapshots` | Order book snapshots (bid, ask, midpoint, spread) |
-| `signals` | Bayesian signal output (p_hat, confidence) |
+| `signals` | Signal output (p_hat, confidence, prior, n_observations) |
 | `decisions` | Every trade/skip with edge, fees, sizing |
-| `trades` | Executed trades with P&L and bankroll state |
+| `trades` | Executed trades with P&L, bankroll state, estimated slippage |
 | `config_snapshots` | Config JSON at startup |
+| `open_positions` | Persisted open positions (survive restarts) |
+| `signal_state` | Warm-up state for `AssetTracker` (vol, drift, slow_drift) |
+
+### Restart resilience
+
+On startup, the bot:
+1. Restores bankroll from the last trade's `bankroll_after` (or config default)
+2. Loads open positions from `open_positions` table into executor
+3. Restores signal warm-up state (`AssetTracker` variance/drift) if saved within the last hour
+4. Resumes `next_decision_id` from `MAX(id)` in decisions table
+
+Position writes and signal state saves are **fire-and-forget** via the writer channel — no blocking on the hot path.
 
 Query results anytime:
 
@@ -184,16 +201,17 @@ polymarket-bot/
 ├── schema.sql
 ├── .env.example
 ├── src/
-│   ├── main.rs               # CLI parsing, actor wiring, startup
+│   ├── main.rs               # CLI parsing, actor wiring, startup + restore
 │   ├── cli.rs                 # clap CLI definition
 │   ├── config.rs              # TOML config parsing
 │   ├── types.rs               # Domain types and channel messages
 │   ├── actors/
 │   │   ├── ingest.rs          # Binance WebSocket consumer
 │   │   ├── market_fetcher.rs  # Polymarket market discovery + order books
-│   │   ├── signal.rs          # Bayesian signal engine
+│   │   ├── signal.rs          # Log-normal signal engine (AssetTracker)
 │   │   ├── decision.rs        # Edge gating and position sizing
-│   │   ├── executor.rs        # Paper/live trade execution
+│   │   ├── executor.rs        # Paper/live trade execution + position persistence
+│   │   ├── telegram.rs        # Telegram alerts + periodic summaries
 │   │   └── writer.rs          # Batched SQLite writer
 │   ├── polymarket/
 │   │   ├── client.rs          # Gamma + CLOB API HTTP client
@@ -202,16 +220,32 @@ polymarket-bot/
 │   │   └── types.rs           # API request/response types
 │   ├── math/
 │   │   ├── lmsr.rs            # LMSR pricing
-│   │   ├── bayesian.rs        # Log-space Bayesian updates
-│   │   ├── kelly.rs           # Kelly criterion sizing
-│   │   └── decay.rs           # Exponential decay weighting
+│   │   └── kelly.rs           # Kelly criterion sizing
 │   └── db/
 │       ├── mod.rs             # SQLite init (WAL, foreign keys)
-│       ├── schema.rs          # Table creation
-│       └── queries.rs         # Insert/update helpers
+│       ├── schema.rs          # Table creation + migrations
+│       └── queries.rs         # Insert/update/restore helpers
 └── docs/
-    └── dashboard-queries.md
+    ├── dashboard-queries.md
+    └── plans/
 ```
+
+## Telegram notifications
+
+Optional. Add to `config.toml`:
+
+```toml
+[telegram]
+bot_token = "123456:ABC-DEF..."   # from @BotFather
+chat_id = "your_chat_id"          # from @userinfobot
+summary_interval_mins = 60
+```
+
+You'll receive:
+- **Trade Filled** — on every position entry (market, side, size, price, edge%)
+- **Trade Settled** — on market resolution (outcome, P&L, fees, bankroll)
+- **Periodic Summary** — every N minutes (win/loss/rate, total P&L, bankroll)
+- **Final Session Summary** — on graceful shutdown (Ctrl+C)
 
 ## Code quality
 

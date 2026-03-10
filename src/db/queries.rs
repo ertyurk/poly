@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::types::*;
 
@@ -145,6 +145,76 @@ pub fn insert_config_snapshot(
     )?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Open position persistence (survive restarts)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct PersistedPosition {
+    pub decision_id: i64,
+    pub market_id: String,
+    pub side: String,
+    pub entry_price: f64,
+    pub size: f64,
+    pub fee_rate: f64,
+    pub entry_ts: i64,
+    pub estimated_slippage: f64,
+}
+
+pub fn save_open_position(conn: &Connection, pos: &PersistedPosition) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO open_positions (decision_id, market_id, side, entry_price, size, fee_rate, entry_ts, estimated_slippage)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            pos.decision_id, pos.market_id, pos.side, pos.entry_price,
+            pos.size, pos.fee_rate, pos.entry_ts, pos.estimated_slippage,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_open_positions(conn: &Connection, market_id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM open_positions WHERE market_id = ?1", params![market_id])?;
+    Ok(())
+}
+
+pub fn load_open_positions(conn: &Connection) -> Result<Vec<PersistedPosition>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT decision_id, market_id, side, entry_price, size, fee_rate, entry_ts, estimated_slippage
+         FROM open_positions",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PersistedPosition {
+            decision_id: row.get(0)?,
+            market_id: row.get(1)?,
+            side: row.get(2)?,
+            entry_price: row.get(3)?,
+            size: row.get(4)?,
+            fee_rate: row.get(5)?,
+            entry_ts: row.get(6)?,
+            estimated_slippage: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn last_bankroll(conn: &Connection) -> Result<Option<f64>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT bankroll_after FROM trades ORDER BY resolved_ts DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn max_decision_id(conn: &Connection) -> Result<i64, rusqlite::Error> {
+    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM decisions", [], |row| row.get(0))
+}
+
+// ---------------------------------------------------------------------------
+// Signal state persistence
+// ---------------------------------------------------------------------------
 
 /// Persisted signal state for warm-up recovery.
 #[derive(Debug, Clone)]

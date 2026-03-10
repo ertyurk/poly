@@ -241,6 +241,19 @@ pub enum DbEvent {
         config_json: String,
         ts: TsMicros,
     },
+    SaveOpenPosition {
+        decision_id: i64,
+        market_id: String,
+        side: Side,
+        entry_price: f64,
+        size: f64,
+        fee_rate: f64,
+        entry_ts: TsMicros,
+        estimated_slippage: f64,
+    },
+    ClearOpenPositions {
+        market_id: String,
+    },
     SaveSignalState {
         asset: String,
         last_price: f64,

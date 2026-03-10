@@ -11,7 +11,10 @@ const MIN_ALERT_INTERVAL: Duration = Duration::from_secs(1);
 /// Messages the Telegram actor can receive.
 #[derive(Debug, Clone)]
 pub enum TelegramAlert {
-    TradeFilled(TradeDecision),
+    TradeFilled {
+        decision: TradeDecision,
+        fill_price: f64,
+    },
     TradeSettled(TradeResult),
 }
 
@@ -254,21 +257,19 @@ impl TelegramActor {
 
 fn format_alert(alert: &TelegramAlert) -> String {
     match alert {
-        TelegramAlert::TradeFilled(dec) => {
+        TelegramAlert::TradeFilled { decision, fill_price } => {
             format!(
                 "\u{1f4c8} *Trade Filled*\n\
                  Market: `{}`\n\
                  Side: *{}*\n\
                  Size: ${:.2}\n\
-                 Price: {:.4}\n\
-                 Edge: {:.2}%\n\
-                 Eff. Edge: {:.2}%",
-                dec.market_id,
-                dec.side,
-                dec.size,
-                dec.price,
-                dec.edge * 100.0,
-                dec.effective_edge * 100.0,
+                 Fill price: {:.4}\n\
+                 Edge: {:.2}%",
+                decision.market_id,
+                decision.side,
+                decision.size,
+                fill_price,
+                decision.effective_edge * 100.0,
             )
         }
         TelegramAlert::TradeSettled(tr) => {

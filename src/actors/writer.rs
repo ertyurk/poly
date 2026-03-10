@@ -109,6 +109,31 @@ impl WriterActor {
                 DbEvent::ConfigSnapshot { config_json, ts } => {
                     db::queries::insert_config_snapshot(&tx, config_json, *ts)?;
                 }
+                DbEvent::SaveOpenPosition {
+                    decision_id,
+                    market_id,
+                    side,
+                    entry_price,
+                    size,
+                    fee_rate,
+                    entry_ts,
+                    estimated_slippage,
+                } => {
+                    let pos = db::queries::PersistedPosition {
+                        decision_id: *decision_id,
+                        market_id: market_id.clone(),
+                        side: side.to_string(),
+                        entry_price: *entry_price,
+                        size: *size,
+                        fee_rate: *fee_rate,
+                        entry_ts: *entry_ts,
+                        estimated_slippage: *estimated_slippage,
+                    };
+                    db::queries::save_open_position(&tx, &pos)?;
+                }
+                DbEvent::ClearOpenPositions { market_id } => {
+                    db::queries::delete_open_positions(&tx, market_id)?;
+                }
                 DbEvent::SaveSignalState {
                     asset,
                     last_price,
