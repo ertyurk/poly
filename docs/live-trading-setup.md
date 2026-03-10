@@ -6,33 +6,13 @@ Paper trading (`--paper-trade`) requires **none** of this — it uses public end
 
 ## Prerequisites
 
-- An Ethereum wallet (MetaMask, Rabby, etc.) with a private key you control
-- A Polymarket account linked to that wallet
-- MATIC (POL) on Polygon for gas fees
+- A Polymarket account (Google sign-up or external wallet)
 - USDC on Polygon for trading capital
+- Your wallet's private key (see below)
 
-## Step 1: Get Your Polymarket API Credentials
+## Step 1: Export Your Wallet Private Key
 
-1. Go to [polymarket.com](https://polymarket.com) and sign in
-2. Open **Settings** > **API Keys** (or navigate to the API management page)
-3. Click **Create API Key**
-4. Save the three values shown:
-   - **API Key** — your public key identifier
-   - **API Secret** — base64-encoded HMAC secret (shown once, save it immediately)
-   - **Passphrase** — chosen during key creation
-
-These credentials authenticate requests to the CLOB API via HMAC-SHA256 signatures. The bot sends four headers on every authenticated request:
-
-| Header | Value |
-|---|---|
-| `POLY-API-KEY` | Your API key |
-| `POLY-SIGNATURE` | HMAC-SHA256 of `timestamp\nmethod\npath\nbody`, base64-encoded |
-| `POLY-TIMESTAMP` | Unix timestamp (seconds) |
-| `POLY-PASSPHRASE` | Your passphrase |
-
-## Step 2: Export Your Wallet Private Key
-
-The bot needs your Ethereum private key to sign EIP-712 order messages for the Polymarket CTF Exchange contract on Polygon (chain ID 137). The key must belong to the same wallet your Polymarket account is linked to.
+The bot uses the official Polymarket Rust SDK (`polymarket-client-sdk`), which derives all API credentials (API key, secret, passphrase) from your private key automatically via L1 authentication. You only need the private key.
 
 **From Polymarket (Google/email sign-up via Magic.Link) — most common:**
 1. Go to Polymarket **Settings** > **Private Key**
@@ -55,10 +35,10 @@ This is the wallet Polymarket created for you automatically. You must use this k
 
 **Security notes:**
 - This key has full control of your wallet. Never share it.
-- The bot derives your wallet address from this key automatically (`signing::address_from_key`).
+- The SDK derives your wallet address and API credentials from this key locally.
 - Orders are signed locally — the private key is never sent over the network.
 
-## Step 3: Create the `.env` File
+## Step 2: Create the `.env` File
 
 Copy the example file and fill in your values:
 
@@ -72,19 +52,13 @@ Edit `.env`:
 # Logging (optional, defaults to info)
 RUST_LOG=polymarket_bot=info
 
-# Polymarket CLOB API credentials (from Step 1)
-POLYMARKET_API_KEY=your_api_key_here
-POLYMARKET_API_SECRET=your_base64_secret_here
-POLYMARKET_PASSPHRASE=your_passphrase_here
-
-# Ethereum private key for EIP-712 signing (from Step 2)
-# Hex string, NO 0x prefix
+# Wallet private key (from Step 1) — hex, with or without 0x prefix
 PRIVATE_KEY=abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
 ```
 
 The bot loads `.env` automatically via `dotenvy` on startup.
 
-## Step 4: Switch Config to Live Mode
+## Step 3: Switch Config to Live Mode
 
 In `config.toml`, change the mode:
 
@@ -99,9 +73,9 @@ Or simply run without `--paper-trade`:
 cargo run -- --asset btc --bankroll 1000
 ```
 
-When `--paper-trade` is omitted, the bot reads all four env vars on startup and will fail immediately if any are missing.
+When `--paper-trade` is omitted, the bot reads `PRIVATE_KEY` on startup, authenticates with the Polymarket SDK, and will fail immediately if the key is missing or invalid.
 
-## Step 5: (Optional) Telegram Notifications
+## Step 4: (Optional) Telegram Notifications
 
 Add to `config.toml`:
 
@@ -141,28 +115,28 @@ summary_interval_mins = 15
                         ┌──────────────────────────┐
                         │     .env file             │
                         │                           │
-                        │  POLYMARKET_API_KEY       │
-                        │  POLYMARKET_API_SECRET ───┼──► HMAC-SHA256 request signing
-                        │  POLYMARKET_PASSPHRASE    │    (CLOB API auth headers)
+                        │  PRIVATE_KEY ─────────────┼──► SDK L1 auth (EIP-191 sign)
+                        │                           │    derives API key/secret/passphrase
+                        │                           │    automatically on connect()
                         │                           │
-                        │  PRIVATE_KEY ─────────────┼──► EIP-712 order signing
+                        │                           │──► EIP-712 order signing
                         │                           │    (Polygon on-chain settlement)
                         └──────────────────────────┘
 
-CLOB API auth (every request):
-  signature = HMAC-SHA256(api_secret, "timestamp\nmethod\npath\nbody")
+On startup (LiveTrader::connect):
+  1. Sign L1 auth message with private key → derive API credentials
+  2. SDK stores credentials internally for all subsequent requests
 
-Order signing (trade placement only):
-  EIP-712 typed data → keccak256 → ECDSA sign with private_key
-  Signed on Polygon (chain 137) for CTF Exchange contract
+Order placement:
+  SDK builds order → EIP-712 sign → POST /order with derived auth headers
 ```
 
 ## Troubleshooting
 
 | Error | Cause | Fix |
 |---|---|---|
-| `POLYMARKET_API_KEY env var required` | Missing `.env` or missing key | Check `.env` exists and has all 4 values |
-| `failed to fetch fee rate` | API key doesn't have read permissions | Regenerate API key with full permissions |
-| `order rejected` | Insufficient USDC balance or allowance | Fund wallet with USDC on Polygon, approve CTF Exchange |
+| `PRIVATE_KEY env var required` | Missing `.env` or missing key | Check `.env` exists with `PRIVATE_KEY` |
+| `polymarket auth failed` | Invalid private key or network error | Verify key is correct hex, check internet |
+| `order rejected` | Insufficient USDC balance or allowance | Fund wallet with USDC on Polygon |
 | `order placement failed` | Network error or CLOB downtime | Check Polymarket status, retry later |
 | `bad json` from Telegram | Invalid bot token | Verify token with `@BotFather`, regenerate if needed |

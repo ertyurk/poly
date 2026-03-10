@@ -39,6 +39,19 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         );",
     )?;
 
+    // Migration: create fill_rejections table
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fill_rejections (
+            id INTEGER PRIMARY KEY,
+            market_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            size REAL NOT NULL,
+            price REAL NOT NULL,
+            reason TEXT NOT NULL,
+            ts INTEGER NOT NULL
+        );",
+    )?;
+
     Ok(())
 }
 

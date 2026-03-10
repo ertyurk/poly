@@ -14,7 +14,7 @@ use actors::signal::{AssetTracker, SignalActor};
 use actors::telegram::{TelegramActor, TelegramAlert, TelegramStats};
 use actors::writer::WriterActor;
 use cli::Cli;
-use polymarket::PolymarketClient;
+use polymarket::{LiveTrader, PolymarketClient};
 use types::*;
 
 use clap::Parser;
@@ -65,29 +65,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(mode = mode_str, bankroll = format_args!("${bankroll:.2}"), "loaded config");
 
-    // 7. Build Polymarket client for order execution (live mode only)
-    let exec_client: Option<PolymarketClient> = if paper_trade {
+    // 7. Build LiveTrader for order execution (live mode only)
+    let live_trader: Option<LiveTrader> = if paper_trade {
         None
     } else {
-        let api_key = std::env::var("POLYMARKET_API_KEY")
-            .map_err(|_| "POLYMARKET_API_KEY env var required for real trading")?;
-        let api_secret = std::env::var("POLYMARKET_API_SECRET")
-            .map_err(|_| "POLYMARKET_API_SECRET env var required for real trading")?;
-        let passphrase = std::env::var("POLYMARKET_PASSPHRASE")
-            .map_err(|_| "POLYMARKET_PASSPHRASE env var required for real trading")?;
         let private_key = std::env::var("PRIVATE_KEY")
             .map_err(|_| "PRIVATE_KEY env var required for real trading")?;
 
         Some(
-            PolymarketClient::new_authenticated(
-                &config.polymarket.gamma_url,
-                &config.polymarket.clob_url,
-                api_key,
-                api_secret,
-                passphrase,
-                private_key,
-            )
-            .map_err(|e| -> Box<dyn std::error::Error> { e })?,
+            LiveTrader::connect(&private_key)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e })?,
         )
     };
 
@@ -139,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.writer.batch_size,
         config.writer.flush_interval_ms,
     )?;
-    tokio::spawn(async move {
+    let writer_handle = tokio::spawn(async move {
         writer.run(db_rx).await;
     });
 
@@ -225,6 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    // Keep a clone for executor to send bankroll updates
+    let bankroll_tx = decision_in_tx.clone();
     drop(decision_in_tx);
 
     // Decision actor
@@ -246,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Market fetcher (replaces simulator — uses real Polymarket data)
     // Fetcher only needs read-only access — only executor needs auth
     let fetcher_client =
-        PolymarketClient::new_readonly(&config.polymarket.gamma_url, &config.polymarket.clob_url);
+        PolymarketClient::new(&config.polymarket.gamma_url, &config.polymarket.clob_url);
     let fetcher = MarketFetcher::new(
         fetcher_client,
         cli.asset.clone(),
@@ -299,10 +289,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Executor task — handles fills + settlements, returns stats
     let exec_db_tx = db_tx.clone();
     let mut exec_shutdown = shutdown_rx.clone();
+    let exec_bankroll_tx = bankroll_tx;
     let exec_handle = tokio::spawn(async move {
         let exec_mode = if paper_trade { Mode::Paper } else { Mode::Live };
         let mut executor =
-            Executor::new(exec_mode, bankroll, exec_client, config.strategy.max_total_exposure);
+            Executor::new(exec_mode, bankroll, live_trader, config.strategy.max_total_exposure);
         executor.set_next_decision_id(next_decision_id);
 
         // Restore open positions from previous session
@@ -332,6 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut trades_placed: u32 = 0;
         let mut trades_skipped: u32 = 0;
+        let mut fill_rejections: u32 = 0;
         let mut markets_resolved: u32 = 0;
         let mut wins: u32 = 0;
         let mut losses: u32 = 0;
@@ -350,30 +342,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 msg = decision_out_rx.recv() => {
                     match msg {
                         Some(DecisionOutput::Trade(dec)) => {
-                            let best_ask = dec.price;
-                            let best_bid = dec.price;
-                            if let Some(fill) = executor.try_fill(&dec, best_ask, best_bid).await {
-                                trades_placed += 1;
-                                if let Some(ref stats) = exec_tg_stats {
-                                    stats.record_fill();
+                            match executor.try_fill(&dec, dec.best_ask, dec.best_bid).await {
+                                Ok(fill) => {
+                                    trades_placed += 1;
+                                    if let Some(ref stats) = exec_tg_stats {
+                                        stats.record_fill();
+                                    }
+                                    if let Some(ref tg) = telegram_tx {
+                                        let _ = tg.try_send(TelegramAlert::TradeFilled {
+                                            decision: dec.clone(),
+                                            fill_price: fill.fill_price,
+                                        });
+                                    }
+                                    let _ = exec_db_tx.try_send(DbEvent::SaveOpenPosition {
+                                        decision_id: fill.decision_id,
+                                        market_id: dec.market_id.clone(),
+                                        side: dec.side,
+                                        entry_price: fill.fill_price,
+                                        size: fill.size_shares,
+                                        fee_rate: dec.fee_rate,
+                                        entry_ts: dec.ts,
+                                        estimated_slippage: fill.estimated_slippage,
+                                    });
+                                    let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
+                                    // Update decision actor's bankroll after committing capital
+                                    let _ = exec_bankroll_tx.try_send(
+                                        DecisionInput::BankrollUpdate(executor.bankroll()),
+                                    );
                                 }
-                                if let Some(ref tg) = telegram_tx {
-                                    let _ = tg.try_send(TelegramAlert::TradeFilled {
-                                        decision: dec.clone(),
-                                        fill_price: fill.fill_price,
+                                Err(reason) => {
+                                    fill_rejections += 1;
+                                    let _ = exec_db_tx.try_send(DbEvent::FillRejection {
+                                        market_id: dec.market_id.clone(),
+                                        side: dec.side,
+                                        size: dec.size_usd,
+                                        price: dec.price,
+                                        reason,
+                                        ts: dec.ts,
                                     });
                                 }
-                                let _ = exec_db_tx.try_send(DbEvent::SaveOpenPosition {
-                                    decision_id: fill.decision_id,
-                                    market_id: dec.market_id.clone(),
-                                    side: dec.side,
-                                    entry_price: fill.fill_price,
-                                    size: dec.size,
-                                    fee_rate: dec.fee_rate,
-                                    entry_ts: dec.ts,
-                                    estimated_slippage: fill.estimated_slippage,
-                                });
-                                let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
                             }
                         }
                         Some(DecisionOutput::Skip(nt)) => {
@@ -403,7 +410,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tracing::info!(
                                 market = %tr.market_id,
                                 outcome = %tr.outcome,
-                                size = format_args!("${:.2}", tr.size),
+                                size_shares = format_args!("{:.2}", tr.size_shares),
                                 pnl = format_args!("{:+.2}", tr.pnl),
                                 bankroll = format_args!("${:.2}", tr.bankroll_after),
                                 "settled"
@@ -417,6 +424,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let _ = exec_db_tx.try_send(DbEvent::Trade(tr.clone()));
                         }
+                        // Update decision actor's bankroll after settlements
+                        let _ = exec_bankroll_tx.try_send(
+                            DecisionInput::BankrollUpdate(executor.bankroll()),
+                        );
                     }
                 }
 
@@ -448,6 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             executor.bankroll(),
             trades_placed,
             trades_skipped,
+            fill_rejections,
             markets_resolved,
             wins,
             losses,
@@ -477,13 +489,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("shutting down...");
     let _ = shutdown_tx.send(true);
 
-    // 15. Wait for actors to finish, then print summary
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    // 15. Wait for executor to finish, then drain DB writes
+    // Drop our db_tx so once all actors exit and drop their clones,
+    // the writer's channel closes and it flushes remaining events.
+    drop(db_tx);
 
     if let Ok((
         final_bankroll,
         trades_placed,
         trades_skipped,
+        fill_rejections,
         markets_resolved,
         wins,
         losses,
@@ -504,6 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("══════════════════════════════════════════");
         tracing::info!("  Markets resolved:   {markets_resolved}");
         tracing::info!("  Trades placed:      {trades_placed}");
+        tracing::info!("  Fill rejections:    {fill_rejections}");
         tracing::info!("  Signals skipped:    {trades_skipped}");
         tracing::info!("  Wins / Losses:      {wins} / {losses}");
         tracing::info!("  Win rate:           {win_rate:.1}%");
@@ -515,6 +531,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("══════════════════════════════════════════");
     }
 
+    // Wait for writer to flush all remaining events
+    let _ = writer_handle.await;
     tracing::info!("shutdown complete — query data/bot.db for detailed dashboard data");
     Ok(())
 }

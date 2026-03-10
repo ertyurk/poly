@@ -227,6 +227,23 @@ impl MarketFetcher {
                 cid = &condition_id[..condition_id.len().min(8)]
             );
 
+            // Use actual market start time from slug for UpDown markets;
+            // fall back to discovery time for other market types.
+            let open_ts = if matches!(market_type, MarketType::UpDown) {
+                match parse_open_ts_from_slug(gm) {
+                    Some(ts) => ts,
+                    None => {
+                        tracing::warn!(
+                            market_id = %market_id,
+                            "failed to parse open_ts from slug, skipping market"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                now
+            };
+
             let ms = MarketState {
                 market_id: market_id.clone(),
                 asset,
@@ -237,7 +254,7 @@ impl MarketFetcher {
                 best_ask: book.best_ask,
                 midpoint: book.midpoint,
                 resolution_ts,
-                open_ts: now,
+                open_ts,
                 open_price,
                 volume_24h: volume,
                 market_type,
@@ -256,7 +273,7 @@ impl MarketFetcher {
                     token_yes,
                     token_no,
                     resolution_ts,
-                    open_ts: now,
+                    open_ts,
                     open_price,
                     volume_24h: volume,
                     market_type,
@@ -339,7 +356,17 @@ impl MarketFetcher {
 
         for cid in to_resolve {
             let resolved_side = match self.client.fetch_market_by_id(&cid).await {
-                Ok(Some(gm)) if gm.closed.unwrap_or(false) => determine_outcome(&gm),
+                Ok(Some(gm)) if gm.closed.unwrap_or(false) => {
+                    if let Some(side) = determine_outcome(&gm) {
+                        side
+                    } else {
+                        tracing::warn!(
+                            condition_id = %cid,
+                            "cannot determine outcome from API response, skipping settlement"
+                        );
+                        continue;
+                    }
+                }
                 Ok(Some(_)) => {
                     // Past resolution time but not closed yet — check again later
                     continue;
@@ -521,6 +548,22 @@ fn parse_market_type(question: &str) -> MarketType {
     MarketType::UpDown
 }
 
+/// Parse the market open timestamp from the event slug.
+///
+/// Slug format: `{asset}-updown-{window}-{start_unix_ts}`
+/// e.g., "btc-updown-5m-1741579500"
+fn parse_open_ts_from_slug(gm: &crate::polymarket::types::GammaMarket) -> Option<TsMicros> {
+    let slug = gm.slug.as_deref()?;
+    // Slug ends with a unix timestamp after the last '-'
+    let last_part = slug.rsplit('-').next()?;
+    let unix_secs: i64 = last_part.parse().ok()?;
+    // Sanity: must be a reasonable timestamp (after 2020, before 2030)
+    if unix_secs < 1_577_836_800 || unix_secs > 1_893_456_000 {
+        return None;
+    }
+    Some(unix_secs * 1_000_000)
+}
+
 /// Extract dollar amounts from text. E.g., "$78,000" → 78000.0
 fn extract_dollar_amounts(text: &str) -> Vec<f64> {
     let mut amounts = Vec::new();
@@ -548,12 +591,12 @@ fn extract_dollar_amounts(text: &str) -> Vec<f64> {
     amounts
 }
 
-fn determine_outcome(gm: &crate::polymarket::types::GammaMarket) -> Side {
+fn determine_outcome(gm: &crate::polymarket::types::GammaMarket) -> Option<Side> {
     // outcomePrices is typically "[1.0, 0.0]" for YES or "[0.0, 1.0]" for NO
     if let Some(prices_str) = &gm.outcome_prices {
         if let Ok(prices) = serde_json::from_str::<Vec<String>>(prices_str) {
             if let Some(yes_price) = prices.first().and_then(|p| p.parse::<f64>().ok()) {
-                return if yes_price > 0.5 { Side::Yes } else { Side::No };
+                return Some(if yes_price > 0.5 { Side::Yes } else { Side::No });
             }
         }
     }
@@ -562,10 +605,10 @@ fn determine_outcome(gm: &crate::polymarket::types::GammaMarket) -> Side {
         for t in tokens {
             if matches!(t.outcome.as_deref(), Some("Yes" | "Up")) {
                 if let Some(price) = t.price {
-                    return if price > 0.5 { Side::Yes } else { Side::No };
+                    return Some(if price > 0.5 { Side::Yes } else { Side::No });
                 }
             }
         }
     }
-    Side::Yes // default
+    None
 }

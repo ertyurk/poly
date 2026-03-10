@@ -267,7 +267,7 @@ fn format_alert(alert: &TelegramAlert) -> String {
                  Edge: {:.2}%",
                 decision.market_id,
                 decision.side,
-                decision.size,
+                decision.size_usd,
                 fill_price,
                 decision.effective_edge * 100.0,
             )
@@ -288,7 +288,7 @@ fn format_alert(alert: &TelegramAlert) -> String {
                 tr.market_id,
                 tr.side,
                 tr.outcome,
-                tr.size,
+                tr.size_shares,
                 tr.entry_price,
                 tr.pnl,
                 tr.fee_paid,

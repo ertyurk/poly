@@ -1,4 +1,4 @@
-use crate::polymarket::PolymarketClient;
+use crate::polymarket::LiveTrader;
 use crate::types::*;
 
 /// Maximum price slippage tolerance (fraction) before rejecting a fill.
@@ -9,6 +9,7 @@ const MAX_SLIPPAGE: f64 = 0.10;
 pub struct FillResult {
     pub decision_id: i64,
     pub fill_price: f64,
+    pub size_shares: f64,
     pub estimated_slippage: f64,
 }
 
@@ -35,7 +36,7 @@ struct OpenPosition {
     market_id: String,
     side: Side,
     entry_price: f64,
-    size: f64,
+    size_shares: f64,
     fee_rate: f64,
     entry_ts: TsMicros,
     estimated_slippage: f64,
@@ -53,22 +54,24 @@ pub struct Executor {
     bankroll: f64,
     positions: Vec<OpenPosition>,
     next_decision_id: i64,
-    client: Option<PolymarketClient>,
+    trader: Option<LiveTrader>,
     /// Maps market_id → (token_yes, token_no)
     market_tokens: std::collections::HashMap<String, (String, String)>,
     /// Maximum fraction of bankroll that can be committed across all open positions.
     max_total_exposure: f64,
+    /// Markets that recently failed to fill — cooldown to prevent API spam.
+    failed_cooldown: std::collections::HashMap<String, crate::types::TsMicros>,
 }
 
 impl Executor {
     /// Create an executor.
     ///
-    /// In `Paper` mode, `client` can be `None` — fills are simulated locally.
-    /// In `Live` mode, `client` must be `Some` with authenticated credentials.
+    /// In `Paper` mode, `trader` can be `None` — fills are simulated locally.
+    /// In `Live` mode, `trader` must be `Some` with authenticated SDK client.
     pub fn new(
         mode: Mode,
         initial_bankroll: f64,
-        client: Option<PolymarketClient>,
+        trader: Option<LiveTrader>,
         max_total_exposure: f64,
     ) -> Self {
         Self {
@@ -76,9 +79,10 @@ impl Executor {
             bankroll: initial_bankroll,
             positions: Vec::new(),
             next_decision_id: 1,
-            client,
+            trader,
             market_tokens: std::collections::HashMap::new(),
             max_total_exposure,
+            failed_cooldown: std::collections::HashMap::new(),
         }
     }
 
@@ -89,7 +93,7 @@ impl Executor {
         market_id: String,
         side: Side,
         entry_price: f64,
-        size: f64,
+        size_shares: f64,
         fee_rate: f64,
         entry_ts: TsMicros,
         estimated_slippage: f64,
@@ -99,7 +103,7 @@ impl Executor {
             market_id,
             side,
             entry_price,
-            size,
+            size_shares,
             fee_rate,
             entry_ts,
             estimated_slippage,
@@ -134,27 +138,39 @@ impl Executor {
     /// Try to fill a trade decision.
     ///
     /// In `Paper` mode: simulates the fill at market prices.
-    /// In `Live` mode: places an order via Polymarket CLOB API.
+    /// In `Live` mode: places an order via Polymarket official SDK.
     pub async fn try_fill(
         &mut self,
         dec: &TradeDecision,
         best_ask: f64,
         best_bid: f64,
-    ) -> Option<FillResult> {
+    ) -> Result<FillResult, String> {
         // Only one position per market
         if self.positions.iter().any(|p| p.market_id == dec.market_id) {
-            return None;
+            return Err("duplicate_position".to_string());
+        }
+
+        // Cooldown: skip markets that failed recently (60s)
+        const COOLDOWN_MICROS: i64 = 60_000_000;
+        let now = crate::types::now_micros();
+        if let Some(&failed_at) = self.failed_cooldown.get(&dec.market_id) {
+            if now - failed_at < COOLDOWN_MICROS {
+                return Err("cooldown".to_string());
+            }
+            self.failed_cooldown.remove(&dec.market_id);
         }
 
         // Check total exposure limit: committed capital can't exceed max_total_exposure
+        // size is in shares, so committed = shares * entry_price = USD cost
         let committed: f64 = self
             .positions
             .iter()
-            .map(|p| p.size * p.entry_price)
+            .map(|p| p.size_shares * p.entry_price)
             .sum();
         let max_exposure = self.bankroll * self.max_total_exposure;
         let available = (max_exposure - committed).max(0.0);
-        let cost = dec.size * dec.price;
+        // dec.size_usd is in USD (from Kelly), so cost = dec.size_usd directly
+        let cost = dec.size_usd;
         if cost > available {
             tracing::debug!(
                 market_id = %dec.market_id,
@@ -164,7 +180,7 @@ impl Executor {
                 max_exposure = max_exposure,
                 "fill rejected: exposure limit"
             );
-            return None;
+            return Err("exposure_limit".to_string());
         }
 
         let mut fill_price = match dec.side {
@@ -180,7 +196,7 @@ impl Executor {
                 actual = fill_price,
                 "fill rejected: price slipped"
             );
-            return None;
+            return Err("price_slippage".to_string());
         }
 
         let token_id = self.token_for_trade(&dec.market_id, dec.side);
@@ -188,7 +204,7 @@ impl Executor {
         // Compute slippage for paper mode
         let spread = (best_ask - best_bid).abs();
         let slippage = if self.mode == Mode::Paper {
-            estimate_slippage(spread, dec.size)
+            estimate_slippage(spread, dec.size_usd)
         } else {
             0.0
         };
@@ -199,72 +215,78 @@ impl Executor {
                 // Clamp to at most 5 cents above the original price to avoid
                 // unrealistic fills near 1.0 (which leave no upside).
                 fill_price = (fill_price + slippage).min(fill_price + 0.05).clamp(0.01, 0.95);
-                tracing::info!(
-                    market_id = %dec.market_id,
-                    side = %dec.side,
-                    size = dec.size,
-                    price = fill_price,
-                    slippage = format_args!("{:.4}", slippage),
-                    "paper fill (with slippage)"
-                );
             }
             Mode::Live => {
-                if let Some(ref client) = self.client {
+                if let Some(ref trader) = self.trader {
                     if let Some(ref tid) = token_id {
-                        let side_buy = dec.side == Side::Yes;
-                        let fee_bps = match client.fetch_fee_rate_bps(tid).await {
-                            Ok(bps) => bps,
-                            Err(e) => {
-                                tracing::warn!(
-                                    market_id = %dec.market_id,
-                                    error = %e,
-                                    "failed to fetch fee rate, using default 1000"
-                                );
-                                1000
-                            }
-                        };
-                        match client
-                            .place_order(tid, side_buy, fill_price, dec.size, fee_bps)
+                        // Opening a position = always BUY the relevant token.
+                        // token_for_trade selects token_yes for YES, token_no for NO.
+                        let side_buy = true;
+                        // Convert USD size to shares for the SDK order
+                        let order_shares = dec.size_usd / fill_price;
+                        match trader
+                            .place_order(tid, side_buy, fill_price, order_shares)
                             .await
                         {
-                            Ok(resp) => {
-                                if resp.success.unwrap_or(false) {
+                            Ok(result) => {
+                                if result.success && result.matched {
                                     tracing::info!(
                                         market_id = %dec.market_id,
-                                        order_id = resp.order_id.as_deref().unwrap_or("?"),
+                                        order_id = %result.order_id,
                                         side = %dec.side,
-                                        size = dec.size,
+                                        shares = format_args!("{order_shares:.2}"),
                                         price = fill_price,
-                                        "live fill"
+                                        "live fill (FOK matched)"
                                     );
                                 } else {
                                     tracing::warn!(
                                         market_id = %dec.market_id,
-                                        error = resp.error_msg.as_deref().unwrap_or("unknown"),
+                                        order_id = %result.order_id,
                                         side = %dec.side,
-                                        size = dec.size,
+                                        shares = format_args!("{order_shares:.2}"),
                                         price = fill_price,
-                                        "order rejected"
+                                        success = result.success,
+                                        matched = result.matched,
+                                        "order not filled"
                                     );
-                                    return None;
+                                    self.failed_cooldown.insert(dec.market_id.clone(), crate::types::now_micros());
+                                    return Err("order_not_matched".to_string());
                                 }
                             }
                             Err(e) => {
                                 tracing::error!(
                                     market_id = %dec.market_id,
                                     error = %e,
+                                    side = %dec.side,
+                                    shares = format_args!("{order_shares:.2}"),
+                                    price = fill_price,
                                     "order placement failed"
                                 );
-                                return None;
+                                self.failed_cooldown.insert(dec.market_id.clone(), crate::types::now_micros());
+                                return Err(format!("order_failed: {e}"));
                             }
                         }
                     } else {
                         tracing::warn!(market_id = %dec.market_id, "no token ID for market");
-                        return None;
+                        return Err("no_token_id".to_string());
                     }
                 }
             }
         }
+
+        // Convert USD (from Kelly) to shares: shares = usd / fill_price
+        let size_shares = dec.size_usd / fill_price;
+
+        tracing::info!(
+            market_id = %dec.market_id,
+            side = %dec.side,
+            shares = format_args!("{size_shares:.2}"),
+            usd = format_args!("${:.2}", dec.size_usd),
+            price = fill_price,
+            slippage = format_args!("{slippage:.4}"),
+            mode = ?self.mode,
+            "fill"
+        );
 
         let id = self.next_decision_id;
         self.next_decision_id += 1;
@@ -274,15 +296,16 @@ impl Executor {
             market_id: dec.market_id.clone(),
             side: dec.side,
             entry_price: fill_price,
-            size: dec.size,
+            size_shares,
             fee_rate: dec.fee_rate,
             entry_ts: dec.ts,
             estimated_slippage: slippage,
         });
 
-        Some(FillResult {
+        Ok(FillResult {
             decision_id: id,
             fill_price,
+            size_shares,
             estimated_slippage: slippage,
         })
     }
@@ -304,11 +327,11 @@ impl Executor {
         let mut results = Vec::new();
         for pos in to_settle {
             let won = pos.side == resolved_side;
-            let fee_paid = pos.size * pos.entry_price * pos.fee_rate;
+            let fee_paid = pos.size_shares * pos.entry_price * pos.fee_rate;
             let gross_pnl = if won {
-                pos.size * (1.0 - pos.entry_price)
+                pos.size_shares * (1.0 - pos.entry_price)
             } else {
-                -(pos.size * pos.entry_price)
+                -(pos.size_shares * pos.entry_price)
             };
             let pnl = gross_pnl - fee_paid;
             self.bankroll += pnl;
@@ -320,7 +343,7 @@ impl Executor {
                 market_id: pos.market_id,
                 side: pos.side,
                 entry_price: pos.entry_price,
-                size: pos.size,
+                size_shares: pos.size_shares,
                 fee_rate: pos.fee_rate,
                 fee_paid,
                 gross_pnl,

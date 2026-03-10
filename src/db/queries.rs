@@ -81,7 +81,7 @@ pub fn insert_decision(conn: &Connection, dec: &TradeDecision) -> Result<i64, ru
             dec.market_id,
             "TRADE",
             dec.side.to_string(),
-            dec.size,
+            dec.size_usd,
             dec.price,
             dec.edge,
             dec.effective_edge,
@@ -119,7 +119,7 @@ pub fn insert_trade(conn: &Connection, tr: &TradeResult) -> Result<(), rusqlite:
             tr.market_id,
             tr.side.to_string(),
             tr.entry_price,
-            tr.size,
+            tr.size_shares,
             tr.fee_rate,
             tr.fee_paid,
             tr.gross_pnl,
@@ -197,6 +197,22 @@ pub fn load_open_positions(conn: &Connection) -> Result<Vec<PersistedPosition>, 
         })
     })?;
     rows.collect()
+}
+
+pub fn insert_fill_rejection(
+    conn: &Connection,
+    market_id: &str,
+    side: &str,
+    size: f64,
+    price: f64,
+    reason: &str,
+    ts: TsMicros,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO fill_rejections (market_id, side, size, price, reason, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![market_id, side, size, price, reason, ts],
+    )?;
+    Ok(())
 }
 
 pub fn last_bankroll(conn: &Connection) -> Result<Option<f64>, rusqlite::Error> {

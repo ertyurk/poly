@@ -134,6 +134,24 @@ impl WriterActor {
                 DbEvent::ClearOpenPositions { market_id } => {
                     db::queries::delete_open_positions(&tx, market_id)?;
                 }
+                DbEvent::FillRejection {
+                    market_id,
+                    side,
+                    size,
+                    price,
+                    reason,
+                    ts,
+                } => {
+                    db::queries::insert_fill_rejection(
+                        &tx,
+                        market_id,
+                        &side.to_string(),
+                        *size,
+                        *price,
+                        reason,
+                        *ts,
+                    )?;
+                }
                 DbEvent::SaveSignalState {
                     asset,
                     last_price,

@@ -67,12 +67,14 @@ fn test_insert_decision_and_trade() {
     let dec = TradeDecision {
         market_id: "test-mkt-1".into(),
         side: Side::Yes,
-        size: 1000.0,
+        size_usd: 1000.0,
         price: 0.50,
         edge: 0.10,
         effective_edge: 0.07,
         fee_rate: 0.03,
         kelly_fraction: 0.10,
+        best_bid: 0.48,
+        best_ask: 0.52,
         ts: 1500000,
     };
     let decision_id = db::queries::insert_decision(&conn, &dec).unwrap();
@@ -83,7 +85,7 @@ fn test_insert_decision_and_trade() {
         market_id: "test-mkt-1".into(),
         side: Side::Yes,
         entry_price: 0.50,
-        size: 1000.0,
+        size_shares: 1000.0,
         fee_rate: 0.015625,
         fee_paid: 30.0,
         gross_pnl: 500.0,

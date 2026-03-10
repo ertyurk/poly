@@ -19,19 +19,17 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
 
-# Polymarket API client
+# Polymarket API client (public endpoints)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
-# Polymarket API authentication (HMAC-SHA256)
-hmac = "0.12"
-sha2 = "0.10"
-base64 = "0.22"
-hex = "0.4"
+# Polymarket official SDK (authenticated trading)
+polymarket-client-sdk = { version = "0.4", features = ["clob"] }
+alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers", "contract", "provider-http"] }
+rust_decimal = "1.40"
+rust_decimal_macros = "1.40"
 
-# EIP-712 order signing (real trading)
-k256 = { version = "0.13", features = ["ecdsa"] }
-tiny-keccak = { version = "2", features = ["keccak"] }
-rand = "0.8"
+# Legacy deps still used
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

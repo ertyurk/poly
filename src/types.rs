@@ -143,9 +143,7 @@ pub struct MarketState {
     pub window: Window,
     pub token_yes: String,
     pub token_no: String,
-    #[allow(dead_code)]
     pub best_bid: f64,
-    #[allow(dead_code)]
     pub best_ask: f64,
     pub midpoint: f64,
     pub resolution_ts: TsMicros,
@@ -169,12 +167,15 @@ pub struct Signal {
 pub struct TradeDecision {
     pub market_id: String,
     pub side: Side,
-    pub size: f64,
+    /// Position size in USD (from Kelly criterion).
+    pub size_usd: f64,
     pub price: f64,
     pub edge: f64,
     pub effective_edge: f64,
     pub fee_rate: f64,
     pub kelly_fraction: f64,
+    pub best_bid: f64,
+    pub best_ask: f64,
     pub ts: TsMicros,
 }
 
@@ -194,7 +195,8 @@ pub struct TradeResult {
     pub market_id: String,
     pub side: Side,
     pub entry_price: f64,
-    pub size: f64,
+    /// Position size in shares (= USD / fill_price).
+    pub size_shares: f64,
     pub fee_rate: f64,
     pub fee_paid: f64,
     pub gross_pnl: f64,
@@ -253,6 +255,14 @@ pub enum DbEvent {
     },
     ClearOpenPositions {
         market_id: String,
+    },
+    FillRejection {
+        market_id: String,
+        side: Side,
+        size: f64,
+        price: f64,
+        reason: String,
+        ts: TsMicros,
     },
     SaveSignalState {
         asset: String,

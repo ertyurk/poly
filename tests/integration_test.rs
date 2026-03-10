@@ -24,16 +24,18 @@ async fn test_full_pipeline_paper_trade() {
         0.10,      // min_confidence
         confidence,
         "test-mkt",
+        0.48, // best_bid
+        0.52, // best_ask
     );
 
     let decision = result.expect("expected a trade decision, got skip");
     assert_eq!(decision.side, Side::Yes, "expected Yes side");
-    assert!(decision.size > 0.0, "expected positive size");
+    assert!(decision.size_usd > 0.0, "expected positive size");
 
     // Paper-execute the trade
     let mut executor = Executor::new(Mode::Paper, 100_000.0, None, 0.50);
-    let fill_id = executor.try_fill(&decision, 0.52, 0.48).await;
-    assert!(fill_id.is_some(), "expected fill to succeed");
+    let fill = executor.try_fill(&decision, 0.52, 0.48).await;
+    assert!(fill.is_ok(), "expected fill to succeed");
 
     // Settle: resolved YES (correct prediction)
     let results = executor.settle("test-mkt", Side::Yes, now_micros());
@@ -71,6 +73,8 @@ fn test_full_pipeline_skip_low_edge() {
         0.10,
         confidence,
         "test-mkt-2",
+        0.48, // best_bid
+        0.52, // best_ask
     );
 
     assert!(

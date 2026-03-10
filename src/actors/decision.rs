@@ -60,6 +60,8 @@ pub fn decide(
     min_confidence: f64,
     confidence: f64,
     market_id: &str,
+    best_bid: f64,
+    best_ask: f64,
 ) -> Result<TradeDecision, NoTrade> {
     let ts = now_micros();
 
@@ -111,17 +113,17 @@ pub fn decide(
 
     let lmsr_size = lmsr::optimal_trade_size(p_hat_eff, p_market_eff, b).abs();
     let kelly_size = kelly::position_size(p_hat_eff, p_market_eff, kelly_fraction, bankroll);
-    let mut size = lmsr_size.min(kelly_size);
+    let mut size_usd = lmsr_size.min(kelly_size);
 
     // 8. Bankroll hard cap
-    size = size.min(bankroll * max_bet_fraction);
+    size_usd = size_usd.min(bankroll * max_bet_fraction);
 
     // 9. Stealth cap
-    size = apply_stealth_cap(size, volume_24h, max_volume_pct);
+    size_usd = apply_stealth_cap(size_usd, volume_24h, max_volume_pct);
 
     // 10. Polymarket minimum order size
     const MIN_ORDER_SIZE: f64 = 5.0;
-    if size < MIN_ORDER_SIZE {
+    if size_usd < MIN_ORDER_SIZE {
         return Err(no_trade(SkipReason::InsufficientEdge, eff_edge));
     }
 
@@ -132,12 +134,14 @@ pub fn decide(
     Ok(TradeDecision {
         market_id: market_id.to_string(),
         side,
-        size,
+        size_usd,
         price: p_market,
         edge,
         effective_edge: eff_edge,
         fee_rate,
         kelly_fraction,
+        best_bid,
+        best_ask,
         ts,
     })
 }
@@ -153,6 +157,7 @@ use tokio::sync::mpsc;
 pub enum DecisionInput {
     Signal(Signal),
     Market(MarketState),
+    BankrollUpdate(f64),
 }
 
 /// Messages the DecisionActor emits.
@@ -210,6 +215,9 @@ impl DecisionActor {
                 DecisionInput::Market(ms) => {
                     self.markets.insert(ms.market_id.clone(), ms);
                 }
+                DecisionInput::BankrollUpdate(b) => {
+                    self.bankroll = b;
+                }
                 DecisionInput::Signal(sig) => {
                     let Some(ms) = self.markets.get(&sig.market_id) else {
                         continue;
@@ -231,6 +239,8 @@ impl DecisionActor {
                         self.min_confidence,
                         sig.confidence,
                         &sig.market_id,
+                        ms.best_bid,
+                        ms.best_ask,
                     );
 
                     let output = match result {

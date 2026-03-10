@@ -84,21 +84,18 @@ The bot loads `.env` from the current directory automatically via `dotenvy`. Pap
 
 ```bash
 # .env (in project root)
-POLYMARKET_API_KEY=your_key
-POLYMARKET_API_SECRET=your_secret_base64
-POLYMARKET_PASSPHRASE=your_passphrase
 PRIVATE_KEY=your_ethereum_private_key_hex
 ```
 
-See `.env.example` for a template.
+The official Polymarket SDK derives API credentials from the private key automatically. See `.env.example` for a template.
 
 ### Live trading setup
 
-See [`docs/live-trading-setup.md`](docs/live-trading-setup.md) for the full step-by-step guide (API keys, wallet private key, EIP-712 signing, Telegram).
+See [`docs/live-trading-setup.md`](docs/live-trading-setup.md) for the full step-by-step guide (wallet private key export, Telegram setup).
 
 Quick version:
 1. Copy `.env.example` to `.env`
-2. Fill in your Polymarket API credentials + private key
+2. Fill in your private key
 3. Run without `--paper-trade`:
    ```bash
    cargo run -- --asset btc --bankroll 1000

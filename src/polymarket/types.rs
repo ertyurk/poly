@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // Gamma API responses
@@ -70,49 +70,6 @@ pub struct OrderBookLevel {
 #[allow(dead_code)]
 pub struct MidpointResponse {
     pub mid: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Order placement (real trading)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SignedOrder {
-    pub salt: String,
-    pub maker: String,
-    pub signer: String,
-    pub taker: String,
-    #[serde(rename = "tokenId")]
-    pub token_id: String,
-    #[serde(rename = "makerAmount")]
-    pub maker_amount: String,
-    #[serde(rename = "takerAmount")]
-    pub taker_amount: String,
-    pub expiration: String,
-    pub nonce: String,
-    #[serde(rename = "feeRateBps")]
-    pub fee_rate_bps: String,
-    pub side: String,
-    #[serde(rename = "signatureType")]
-    pub signature_type: u8,
-    pub signature: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OrderPlacement {
-    pub order: SignedOrder,
-    pub owner: String,
-    #[serde(rename = "orderType")]
-    pub order_type: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OrderResponse {
-    pub success: Option<bool>,
-    #[serde(rename = "orderID")]
-    pub order_id: Option<String>,
-    #[serde(rename = "errorMsg")]
-    pub error_msg: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
