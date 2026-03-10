@@ -3,9 +3,13 @@
 Queries for building dashboards from the paper-trading bot's SQLite database.
 All timestamps are unix microseconds. Connect to `data/bot.db` with any SQLite tool.
 
+**DbPro element types:** Metric, Sparkline, Area Chart, Bar Chart, Pie Chart, Table, Progress, Text, Image, GIF, Map
+
 ## Quick Start — Run These First
 
-### Overall Performance (run this first)
+### Overall Performance — `Metric` (run this first)
+
+Use separate Metric elements for: **Net PnL**, **Win Rate**, **Total Trades**, **Final Bankroll**.
 
 ```sql
 SELECT
@@ -21,7 +25,7 @@ SELECT
 FROM trades;
 ```
 
-### Last 10 Trades
+### Last 10 Trades — `Table`
 
 ```sql
 SELECT
@@ -43,9 +47,9 @@ LIMIT 10;
 
 ## Detailed Dashboard Panels
 
-### 1. Equity Curve (Line Chart)
+### 1. Equity Curve — `Area Chart`
 
-Cumulative P&L over time.
+Cumulative P&L over time. X: time, Y: bankroll_after.
 
 ```sql
 SELECT
@@ -56,7 +60,7 @@ FROM trades
 ORDER BY resolved_ts;
 ```
 
-### 2. Win Rate by Asset & Window (Bar Chart)
+### 2. Win Rate by Asset & Window — `Bar Chart`
 
 ```sql
 SELECT
@@ -71,9 +75,9 @@ JOIN markets m ON t.market_id = m.market_id
 GROUP BY m.asset, m.window;
 ```
 
-### 3. Edge vs. Outcome (Scatter / Grouped Bar)
+### 3. Edge vs. Outcome — `Bar Chart`
 
-Did higher-edge trades actually win more often?
+Did higher-edge trades actually win more often? X: edge_bucket, Y: avg_pnl.
 
 ```sql
 SELECT
@@ -92,9 +96,9 @@ GROUP BY edge_bucket
 ORDER BY edge_bucket;
 ```
 
-### 4. Fee Drag Analysis (Pie Chart)
+### 4. Fee Drag Analysis — `Pie Chart`
 
-How much of gross profit is eaten by fees?
+How much of gross profit is eaten by fees? Slice: window, Value: total_fees.
 
 ```sql
 SELECT
@@ -107,7 +111,7 @@ JOIN markets m ON t.market_id = m.market_id
 GROUP BY m.window;
 ```
 
-### 5. Regret Analysis — Skipped Trades (Table)
+### 5. Regret Analysis — Skipped Trades — `Table`
 
 How many skipped signals were actually in the right direction?
 
@@ -125,9 +129,9 @@ WHERE d.action = 'SKIP' AND m.resolved_side IS NOT NULL
 GROUP BY d.skip_reason;
 ```
 
-### 6. Hourly Performance Heatmap
+### 6. Hourly Performance — `Bar Chart`
 
-Which hours (local time) are most profitable?
+Which hours (local time) are most profitable? X: hour, Y: net_pnl.
 
 ```sql
 SELECT
@@ -140,9 +144,9 @@ GROUP BY hour
 ORDER BY hour;
 ```
 
-### 7. Signal Calibration Plot
+### 7. Signal Calibration — `Bar Chart`
 
-Is p_hat well-calibrated? (predicted probability vs. actual outcome rate)
+Is p_hat well-calibrated? X: predicted_bucket, Y: actual_yes_pct.
 
 ```sql
 SELECT
@@ -161,9 +165,9 @@ WHERE m.resolved_side IS NOT NULL
 GROUP BY predicted_bucket;
 ```
 
-### 8. Kelly Fraction Effectiveness (Bar Chart)
+### 8. Kelly Fraction Effectiveness — `Bar Chart`
 
-Are we sizing positions correctly?
+Are we sizing positions correctly? X: kelly_bucket, Y: avg_pnl.
 
 ```sql
 SELECT
@@ -181,7 +185,7 @@ JOIN decisions d ON t.decision_id = d.id
 GROUP BY kelly_bucket;
 ```
 
-### 9. Daily Summary (Table)
+### 9. Daily Summary — `Table`
 
 ```sql
 SELECT
@@ -197,9 +201,9 @@ GROUP BY day
 ORDER BY day;
 ```
 
-### 10. Max Drawdown
+### 10. Max Drawdown — `Metric`
 
-Largest peak-to-trough decline in bankroll.
+Largest peak-to-trough decline in bankroll. Show max_drawdown_pct as the value.
 
 ```sql
 WITH running AS (
@@ -215,9 +219,9 @@ SELECT
 FROM running;
 ```
 
-### 11. Trade Duration Distribution
+### 11. Trade Duration Distribution — `Bar Chart`
 
-Time from entry to resolution.
+Time from entry to resolution. X: window, Y: avg_duration_secs.
 
 ```sql
 SELECT
@@ -231,7 +235,7 @@ JOIN markets m ON t.market_id = m.market_id
 GROUP BY m.window;
 ```
 
-### 12. Market Resolution Tracker
+### 12. Market Resolution Tracker — `Table`
 
 All simulated markets with their outcomes.
 
@@ -249,9 +253,9 @@ ORDER BY open_ts DESC
 LIMIT 50;
 ```
 
-### 13. Bet Size Distribution
+### 13. Bet Size Distribution — `Pie Chart`
 
-How much are we betting per trade?
+How much are we betting per trade? Slice: size_bucket, Value: trades.
 
 ```sql
 SELECT
@@ -270,9 +274,9 @@ GROUP BY size_bucket
 ORDER BY size_bucket;
 ```
 
-### 14. Signal Strength Over Time (for a specific market)
+### 14. Signal Strength Over Time — `Area Chart`
 
-Watch how the bot's confidence evolved during a market window.
+Watch how the bot's confidence evolved during a market window. X: time, Y: p_hat & confidence.
 
 ```sql
 -- Replace 'BTC_5m_0001' with an actual market_id
@@ -286,9 +290,9 @@ WHERE market_id = 'BTC_5m_0001'
 ORDER BY ts;
 ```
 
-### 15. BTC vs ETH Comparison
+### 15. BTC vs ETH Comparison — `Bar Chart`
 
-Which asset is the bot better at predicting?
+Which asset is the bot better at predicting? X: asset, Y: net_pnl.
 
 ```sql
 SELECT
@@ -304,26 +308,86 @@ JOIN markets m ON t.market_id = m.market_id
 GROUP BY m.asset;
 ```
 
+### 16. PnL Sparkline — `Sparkline`
+
+Per-trade PnL as a compact sparkline.
+
+```sql
+SELECT ROUND(pnl, 2) AS pnl
+FROM trades
+ORDER BY resolved_ts;
+```
+
+### 17. Win Rate Progress — `Progress`
+
+Visual progress bar of win rate (0-100%).
+
+```sql
+SELECT
+    ROUND(100.0 * SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) / COUNT(*), 1) AS win_rate_pct
+FROM trades;
+```
+
+### 18. Exposure Usage — `Progress`
+
+How much of max_total_exposure is currently used.
+
+```sql
+SELECT
+    ROUND(100.0 * COALESCE(SUM(t_open.size), 0) /
+        (SELECT bankroll_after FROM trades ORDER BY resolved_ts DESC LIMIT 1) / 0.50, 1) AS exposure_pct
+FROM trades t_open
+JOIN markets m ON t_open.market_id = m.market_id
+WHERE m.resolved_side IS NULL;
+```
+
+### 19. Bankroll Sparkline — `Sparkline`
+
+Bankroll over time as a compact sparkline.
+
+```sql
+SELECT ROUND(bankroll_after, 2) AS bankroll
+FROM trades
+ORDER BY resolved_ts;
+```
+
+### 20. Decision Funnel — `Bar Chart`
+
+How many signals become trades? X: stage, Y: count.
+
+```sql
+SELECT 'Signals' AS stage, COUNT(DISTINCT market_id) AS cnt FROM signals
+UNION ALL
+SELECT 'Decisions', COUNT(*) FROM decisions WHERE action = 'TRADE'
+UNION ALL
+SELECT 'Trades', COUNT(*) FROM trades;
+```
+
 ---
 
 ## Dashboard Panel Summary
 
-| # | Panel | Chart Type | What it answers |
+| # | Panel | DbPro Type | What it answers |
 |---|---|---|---|
-| — | Overall Performance | KPI cards | Am I making or losing money? |
-| — | Last 10 Trades | Table | What just happened? |
-| 1 | Equity curve | Line | How is my bankroll trending? |
-| 2 | Win rate by market | Grouped bar | Which asset/window combo works best? |
-| 3 | Edge calibration | Grouped bar | Do higher-edge trades actually win more? |
-| 4 | Fee drag | Pie | How much are fees costing me? |
-| 5 | Regret tracker | Table | Am I skipping good trades? |
-| 6 | Time-of-day heatmap | Heatmap | When should I run the bot? |
-| 7 | Signal calibration | Scatter | Is the Bayesian model accurate? |
-| 8 | Position sizing | Bar | Is Kelly sizing working? |
-| 9 | Daily P&L | Table | Day-by-day breakdown |
-| 10 | Max drawdown | KPI card | Worst losing streak |
-| 11 | Trade duration | Histogram | How long do positions live? |
-| 12 | Market tracker | Table | All markets and their outcomes |
-| 13 | Bet sizes | Bar | Am I betting too much/little? |
-| 14 | Signal deep-dive | Line | How did confidence evolve in one market? |
-| 15 | BTC vs ETH | Grouped bar | Which asset am I better at? |
+| — | Overall Performance | **Metric** (x4) | Am I making or losing money? |
+| — | Last 10 Trades | **Table** | What just happened? |
+| 1 | Equity curve | **Area Chart** | How is my bankroll trending? |
+| 2 | Win rate by market | **Bar Chart** | Which asset/window combo works best? |
+| 3 | Edge calibration | **Bar Chart** | Do higher-edge trades actually win more? |
+| 4 | Fee drag | **Pie Chart** | How much are fees costing me? |
+| 5 | Regret tracker | **Table** | Am I skipping good trades? |
+| 6 | Hourly performance | **Bar Chart** | When should I run the bot? |
+| 7 | Signal calibration | **Bar Chart** | Is the model accurate? |
+| 8 | Position sizing | **Bar Chart** | Is Kelly sizing working? |
+| 9 | Daily P&L | **Table** | Day-by-day breakdown |
+| 10 | Max drawdown | **Metric** | Worst peak-to-trough decline |
+| 11 | Trade duration | **Bar Chart** | How long do positions live? |
+| 12 | Market tracker | **Table** | All markets and their outcomes |
+| 13 | Bet sizes | **Pie Chart** | Am I betting too much/little? |
+| 14 | Signal deep-dive | **Area Chart** | How did confidence evolve in one market? |
+| 15 | BTC vs ETH | **Bar Chart** | Which asset am I better at? |
+| 16 | PnL sparkline | **Sparkline** | Quick per-trade PnL trend |
+| 17 | Win rate progress | **Progress** | Visual win rate gauge |
+| 18 | Exposure usage | **Progress** | How much risk budget is used? |
+| 19 | Bankroll sparkline | **Sparkline** | Quick bankroll trend |
+| 20 | Decision funnel | **Bar Chart** | How many signals become trades? |
