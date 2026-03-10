@@ -222,8 +222,13 @@ impl Executor {
                         // Opening a position = always BUY the relevant token.
                         // token_for_trade selects token_yes for YES, token_no for NO.
                         let side_buy = true;
-                        // Convert USD size to shares for the SDK order
-                        let order_shares = dec.size_usd / fill_price;
+                        // Convert USD size to whole shares for the SDK order.
+                        // CLOB requires maker_amount (shares × price) to have ≤ 2 decimals.
+                        // Whole shares × 2-decimal price = always ≤ 2 decimals.
+                        let order_shares = (dec.size_usd / fill_price).floor();
+                        if order_shares < 1.0 {
+                            return Err("order_too_small".to_string());
+                        }
                         match trader
                             .place_order(tid, side_buy, fill_price, order_shares)
                             .await
@@ -275,7 +280,12 @@ impl Executor {
         }
 
         // Convert USD (from Kelly) to shares: shares = usd / fill_price
-        let size_shares = dec.size_usd / fill_price;
+        // Live mode uses floored whole shares; paper mode uses exact fractional shares.
+        let size_shares = if self.mode == Mode::Live {
+            (dec.size_usd / fill_price).floor()
+        } else {
+            dec.size_usd / fill_price
+        };
 
         tracing::info!(
             market_id = %dec.market_id,
