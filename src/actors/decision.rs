@@ -65,12 +65,8 @@ pub fn decide(
 ) -> Result<TradeDecision, NoTrade> {
     let ts = now_micros();
 
-    // 1. Compute edge
-    let edge = compute_edge(p_hat, p_market);
-    let edge_abs = edge.abs();
-
     // Helper to build NoTrade
-    let no_trade = |reason: SkipReason, eff_edge: f64| NoTrade {
+    let no_trade = |edge: f64, reason: SkipReason, eff_edge: f64| NoTrade {
         market_id: market_id.to_string(),
         edge,
         effective_edge: eff_edge,
@@ -79,63 +75,80 @@ pub fn decide(
         ts,
     };
 
-    // 2. Check confidence
+    // 1. Check confidence (doesn't need fill price)
     if confidence < min_confidence {
-        return Err(no_trade(SkipReason::LowConfidence, 0.0));
+        return Err(no_trade(p_hat - p_market, SkipReason::LowConfidence, 0.0));
     }
 
-    // 3. Only trade when market is near 50/50 (between 0.35 and 0.65).
-    // Extreme market prices mean: (a) the market already agrees with us
-    // (no edge), or (b) our reference data disagrees (bad open_spot).
-    // Near 50/50, risk/reward is symmetric and edge is most exploitable.
-    if p_market < 0.35 || p_market > 0.65 {
-        return Err(no_trade(SkipReason::InsufficientEdge, 0.0));
-    }
+    // 2. Determine trade direction from midpoint
+    let side = if p_hat > p_market { Side::Yes } else { Side::No };
 
-    // 4. Effective edge
-    let eff_edge = effective_edge(edge_abs, fee_rate);
-    if eff_edge <= 0.0 {
-        return Err(no_trade(SkipReason::FeeTooHigh, eff_edge));
-    }
-
-    // 5. Entry gate
-    if !check_entry_gate(edge_abs, tau_min, p_market, b, 1.0) {
-        return Err(no_trade(SkipReason::InsufficientEdge, eff_edge));
-    }
-
-    // 5-7. Compute sizes
-    // For No side, flip probabilities so Kelly/LMSR work correctly
-    let (p_hat_eff, p_market_eff) = if edge > 0.0 {
-        (p_hat, p_market)
-    } else {
-        (1.0 - p_hat, 1.0 - p_market)
+    // 3. Actual fill price — what we'd pay per share.
+    // This is what matters for profitability, not the midpoint.
+    let fill_price = match side {
+        Side::Yes => best_ask,
+        Side::No => 1.0 - best_bid,
     };
 
-    let lmsr_size = lmsr::optimal_trade_size(p_hat_eff, p_market_eff, b).abs();
-    let kelly_size = kelly::position_size(p_hat_eff, p_market_eff, kelly_fraction, bankroll);
-    let mut size_usd = lmsr_size.min(kelly_size);
-
-    // 8. Bankroll hard cap
-    size_usd = size_usd.min(bankroll * max_bet_fraction);
-
-    // 9. Stealth cap
-    size_usd = apply_stealth_cap(size_usd, volume_24h, max_volume_pct);
-
-    // 10. Polymarket minimum order size
-    const MIN_ORDER_SIZE: f64 = 5.0;
-    if size_usd < MIN_ORDER_SIZE {
-        return Err(no_trade(SkipReason::InsufficientEdge, eff_edge));
+    // 4. Range check on fill price (not midpoint)
+    if fill_price < 0.35 || fill_price > 0.65 {
+        return Err(no_trade(p_hat - p_market, SkipReason::InsufficientEdge, 0.0));
     }
 
-    // 11. Determine side
-    let side = if edge > 0.0 { Side::Yes } else { Side::No };
+    // 5. Compute edge against actual fill price.
+    // YES: we pay fill_price, receive $1 with probability p_hat → edge = p_hat - fill_price
+    // NO:  we pay fill_price, receive $1 with probability (1-p_hat) → edge = (1-p_hat) - fill_price
+    let edge = match side {
+        Side::Yes => p_hat - fill_price,
+        Side::No => (1.0 - p_hat) - fill_price,
+    };
 
-    // 12. Return decision
+    // Edge must be positive at the actual price we'd pay
+    if edge <= 0.0 {
+        return Err(no_trade(edge, SkipReason::InsufficientEdge, 0.0));
+    }
+
+    // 6. Effective edge after fees
+    let eff_edge = effective_edge(edge, fee_rate);
+    if eff_edge <= 0.0 {
+        return Err(no_trade(edge, SkipReason::FeeTooHigh, eff_edge));
+    }
+
+    // 7. Entry gate (using fill price, not midpoint)
+    if !check_entry_gate(edge, tau_min, fill_price, b, 1.0) {
+        return Err(no_trade(edge, SkipReason::InsufficientEdge, eff_edge));
+    }
+
+    // 8. Kelly/LMSR sizing against fill price.
+    // p_hat_eff = our model's probability for the side we're betting on.
+    // fill_price = the cost per share (what the market charges us).
+    let p_hat_eff = match side {
+        Side::Yes => p_hat,
+        Side::No => 1.0 - p_hat,
+    };
+
+    let lmsr_size = lmsr::optimal_trade_size(p_hat_eff, fill_price, b).abs();
+    let kelly_size = kelly::position_size(p_hat_eff, fill_price, kelly_fraction, bankroll);
+    let mut size_usd = lmsr_size.min(kelly_size);
+
+    // 9. Bankroll hard cap
+    size_usd = size_usd.min(bankroll * max_bet_fraction);
+
+    // 10. Stealth cap
+    size_usd = apply_stealth_cap(size_usd, volume_24h, max_volume_pct);
+
+    // 11. Polymarket minimum order size
+    const MIN_ORDER_SIZE: f64 = 5.0;
+    if size_usd < MIN_ORDER_SIZE {
+        return Err(no_trade(edge, SkipReason::InsufficientEdge, eff_edge));
+    }
+
+    // 12. Return decision — price is the actual fill price, not midpoint
     Ok(TradeDecision {
         market_id: market_id.to_string(),
         side,
         size_usd,
-        price: p_market,
+        price: fill_price,
         edge,
         effective_edge: eff_edge,
         fee_rate,
