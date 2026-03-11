@@ -295,36 +295,27 @@ impl DecisionActor {
                     // mid-window (50-85% elapsed) entries win only 22%.
                     // =====================================================
 
-                    let is_convergence = sig.elapsed_pct >= 0.93;
-
-                    // Dead zone: 85-93% elapsed — reversals kill momentum
-                    // trades but outcome isn't locked in enough for convergence.
-                    if sig.elapsed_pct >= 0.85 && !is_convergence {
+                    // Dead zone: ≥85% elapsed — reversals and thin liquidity.
+                    // Convergence regime disabled: proved unprofitable in live
+                    // (6 trades, net -$8.13, terrible R/R at high fill prices).
+                    if sig.elapsed_pct >= 0.85 {
                         continue;
                     }
 
-                    // Too early: <40% elapsed → trend not established, high reversal risk.
-                    // For 5m markets, 40% = 2 min elapsed, 3 min remaining.
-                    // For 15m markets, 40% = 6 min elapsed, 9 min remaining.
-                    if sig.elapsed_pct < 0.40 && !is_convergence {
+                    // Too early: <35% elapsed → trend not established.
+                    // For 5m markets, 35% = 1.75 min elapsed, 3.25 min remaining.
+                    // For 15m markets, 35% = 5.25 min elapsed, 9.75 min remaining.
+                    if sig.elapsed_pct < 0.35 {
                         continue;
                     }
 
-                    // --- Regime-specific parameters ---
-                    let (max_fill_price, min_p_yes, max_p_no, effective_kelly) =
-                        if is_convergence {
-                            // CONVERGENCE: near-expiry, outcome nearly deterministic.
-                            // Allow expensive fills because probability ≈ 1.0.
-                            // Fees at p=0.95 are ~0.0001 (essentially zero).
-                            (0.95, 0.93_f64, 0.07_f64, self.kelly_fraction * 2.0)
-                        } else {
-                            // STANDARD: early momentum entry. Require strong signal.
-                            // 0.55 allows NO trades on near-50% markets where
-                            // fill_price = 1 - best_bid ≈ 0.52.
-                            // YES threshold raised: YES trades win only 29% in data.
-                            // NO with p_hat < 0.30 wins 75% in data.
-                            (0.55, 0.75_f64, 0.30_f64, self.kelly_fraction)
-                        };
+                    // --- Standard regime only ---
+                    // max_fill_price=0.50 ensures R/R ≥ 1:1 on every trade.
+                    // Win: ≥$0.50/share, Lose: ≤$0.50/share → break-even at 50%.
+                    let max_fill_price = 0.50_f64;
+                    let min_p_yes = 0.75_f64;
+                    let max_p_no = 0.30_f64;
+                    let effective_kelly = self.kelly_fraction;
 
                     // P_hat conviction filter: require extreme signal for each side.
                     if sig.p_hat > 0.5 && sig.p_hat < min_p_yes {
@@ -339,22 +330,20 @@ impl DecisionActor {
                     // YES bets on small upticks during downtrends are the main loss driver.
                     // Require the market to not strongly disagree with our direction.
                     let signal_yes = sig.p_hat > 0.5;
-                    if !is_convergence {
-                        if signal_yes && ms.midpoint < 0.40 {
-                            // Market strongly says NO (60%+ conviction) — don't bet YES
-                            continue;
-                        }
-                        if !signal_yes && ms.midpoint > 0.60 {
-                            // Market strongly says YES (60%+ conviction) — don't bet NO
-                            continue;
-                        }
+                    if signal_yes && ms.midpoint < 0.40 {
+                        // Market strongly says NO (60%+ conviction) — don't bet YES
+                        continue;
+                    }
+                    if !signal_yes && ms.midpoint > 0.60 {
+                        // Market strongly says YES (60%+ conviction) — don't bet NO
+                        continue;
                     }
 
                     // Displacement gate: require meaningful move.
                     // Convergence doesn't need displacement — the accumulated
                     // position near expiry IS the signal.
-                    const MIN_DISPLACEMENT_PCT: f64 = 0.07;
-                    if !is_convergence && sig.displacement_pct.abs() < MIN_DISPLACEMENT_PCT {
+                    const MIN_DISPLACEMENT_PCT: f64 = 0.05;
+                    if sig.displacement_pct.abs() < MIN_DISPLACEMENT_PCT {
                         continue;
                     }
 
@@ -374,10 +363,8 @@ impl DecisionActor {
                         self.adapt.w_volume,
                     );
 
-                    // Regime-adjusted min confidence (relaxed for convergence)
-                    let effective_min_conf = if is_convergence {
-                        0.0 // p_hat extremity IS the confidence gate
-                    } else if sig.vol_regime < 0.7 {
+                    // Regime-adjusted min confidence
+                    let effective_min_conf = if sig.vol_regime < 0.7 {
                         self.adapt.min_confidence_quiet
                     } else if sig.vol_regime > 1.5 {
                         self.adapt.min_confidence_hot
@@ -417,7 +404,7 @@ impl DecisionActor {
                     let output = match &result {
                         Ok(td) => {
                             self.pending.insert(td.market_id.clone());
-                            let regime = if is_convergence { "CONV" } else { "STD" };
+                            let regime = "STD";
                             tracing::info!(
                                 market = %td.market_id,
                                 regime,
