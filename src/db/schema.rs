@@ -24,6 +24,18 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         tracing::info!("migrated: added signal_state.slow_drift");
     }
 
+    // Migration: add slow_variance column to signal_state
+    if !column_exists(conn, "signal_state", "slow_variance")? {
+        conn.execute_batch(
+            "ALTER TABLE signal_state ADD COLUMN slow_variance REAL NOT NULL DEFAULT 0.0;",
+        )?;
+        // Backfill: use fast variance as fallback for existing rows
+        conn.execute_batch(
+            "UPDATE signal_state SET slow_variance = variance WHERE slow_variance = 0.0;",
+        )?;
+        tracing::info!("migrated: added signal_state.slow_variance");
+    }
+
     // Migration: create open_positions table
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS open_positions (
@@ -38,6 +50,14 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             PRIMARY KEY (market_id)
         );",
     )?;
+
+    // Migration: add condition_id to markets table (for resolution lookup on restart)
+    if !column_exists(conn, "markets", "condition_id")? {
+        conn.execute_batch(
+            "ALTER TABLE markets ADD COLUMN condition_id TEXT NOT NULL DEFAULT '';",
+        )?;
+        tracing::info!("migrated: added markets.condition_id");
+    }
 
     // Migration: create fill_rejections table
     conn.execute_batch(

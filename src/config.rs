@@ -43,7 +43,75 @@ pub struct Strategy {
     /// 0.03 = 3¢ spread (tight), 0.10 = 10¢ (loose).
     #[serde(default = "default_max_spread")]
     pub max_spread: f64,
+    #[serde(default)]
+    pub adapt: Adapt,
     pub decay: Decay,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Adapt {
+    #[serde(default = "default_w_zscore")]
+    pub w_zscore: f64,
+    #[serde(default = "default_w_ofi")]
+    pub w_ofi: f64,
+    #[serde(default = "default_w_cross")]
+    pub w_cross: f64,
+    #[serde(default = "default_w_volume")]
+    pub w_volume: f64,
+    #[serde(default = "default_min_confidence_quiet")]
+    pub min_confidence_quiet: f64,
+    #[serde(default = "default_min_confidence_normal")]
+    pub min_confidence_normal: f64,
+    #[serde(default = "default_min_confidence_hot")]
+    pub min_confidence_hot: f64,
+    #[serde(default = "default_late_window_pct")]
+    pub late_window_pct: f64,
+    #[serde(default = "default_late_window_kelly_mult")]
+    pub late_window_kelly_mult: f64,
+}
+
+impl Default for Adapt {
+    fn default() -> Self {
+        Self {
+            w_zscore: 0.50,
+            w_ofi: 0.25,
+            w_cross: 0.15,
+            w_volume: 0.10,
+            min_confidence_quiet: 0.10,
+            min_confidence_normal: 0.15,
+            min_confidence_hot: 0.25,
+            late_window_pct: 0.70,
+            late_window_kelly_mult: 1.5,
+        }
+    }
+}
+
+fn default_w_zscore() -> f64 {
+    0.50
+}
+fn default_w_ofi() -> f64 {
+    0.25
+}
+fn default_w_cross() -> f64 {
+    0.15
+}
+fn default_w_volume() -> f64 {
+    0.10
+}
+fn default_min_confidence_quiet() -> f64 {
+    0.10
+}
+fn default_min_confidence_normal() -> f64 {
+    0.15
+}
+fn default_min_confidence_hot() -> f64 {
+    0.25
+}
+fn default_late_window_pct() -> f64 {
+    0.70
+}
+fn default_late_window_kelly_mult() -> f64 {
+    1.5
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

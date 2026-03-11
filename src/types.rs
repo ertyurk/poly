@@ -136,9 +136,24 @@ pub struct SpotPrice {
     pub ts: TsMicros,
 }
 
+/// Enriched tick from Binance — carries flow metadata alongside price.
+/// Used in the signal hot path. SpotPrice is still used for DB writes.
+#[derive(Debug, Clone, Copy)]
+pub struct SpotTick {
+    pub asset: Asset,
+    pub price: f64,
+    pub ts: TsMicros,
+    /// Trade quantity in base asset units (e.g., BTC).
+    pub qty: f64,
+    /// True if the buyer was the maker (i.e., the SELL side was the aggressor).
+    /// false = buyer aggressor (buy pressure), true = seller aggressor (sell pressure).
+    pub buyer_is_maker: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct MarketState {
     pub market_id: String,
+    pub condition_id: String,
     pub asset: Asset,
     pub window: Window,
     pub token_yes: String,
@@ -162,6 +177,21 @@ pub struct Signal {
     pub prior: f64,
     pub n_observations: u32,
     pub ts: TsMicros,
+    // --- ADAPT flow data ---
+    /// Order Flow Imbalance over 10s window [-1, +1].
+    pub ofi_10s: f64,
+    /// Volume ratio: recent 30s vol / baseline. >2 = hot regime.
+    pub vol_ratio: f64,
+    /// True if last trade was unusually large.
+    pub large_trade: bool,
+    /// Realized vol regime: current vol / long-term vol baseline.
+    pub vol_regime: f64,
+    /// Cross-asset momentum signal [-1, +1].
+    pub cross_asset_signal: f64,
+    /// Fraction of market window elapsed [0, 1].
+    pub elapsed_pct: f64,
+    /// Spot displacement from open price (%). Positive = above open.
+    pub displacement_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -276,5 +306,6 @@ pub enum DbEvent {
         drift: f64,
         slow_drift: f64,
         lambda: f64,
+        slow_variance: f64,
     },
 }

@@ -2,6 +2,7 @@ mod actors;
 mod cli;
 mod config;
 mod db;
+mod flow;
 mod math;
 mod polymarket;
 mod types;
@@ -60,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.bankroll.initial
     };
     let restored_positions = db::queries::load_open_positions(&startup_conn).unwrap_or_default();
+    let restored_markets = db::queries::load_markets_for_open_positions(&startup_conn).unwrap_or_default();
     let next_decision_id = db::queries::max_decision_id(&startup_conn).unwrap_or(0) + 1;
     drop(startup_conn);
 
@@ -88,8 +90,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (db_tx, db_rx) = mpsc::channel::<DbEvent>(10_000);
 
     // spot_tx — ingest sends here, then we fan out
-    let (spot_tx, mut spot_rx_fanout) = mpsc::channel::<SpotPrice>(5_000);
-    let (spot_tx_signal, spot_rx_signal) = mpsc::channel::<SpotPrice>(5_000);
+    let (spot_tx, mut spot_rx_fanout) = mpsc::channel::<SpotTick>(5_000);
+    let (spot_tx_signal, spot_rx_signal) = mpsc::channel::<SpotTick>(5_000);
 
     // market channels — market_fetcher → signal and decision
     let (market_tx_signal, market_rx_signal) = mpsc::channel::<MarketState>(100);
@@ -168,6 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.drift,
                     s.slow_drift,
                     s.lambda,
+                    s.variance, // fallback: use fast variance as slow_variance
                 ),
             );
         }
@@ -227,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bankroll,
         config.strategy.max_volume_pct,
         config.strategy.max_bet_fraction,
-        config.strategy.min_confidence,
+        config.strategy.adapt.clone(),
     );
     tokio::spawn(async move {
         decision_actor.run().await;
@@ -237,10 +240,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fetcher only needs read-only access — only executor needs auth
     let fetcher_client =
         PolymarketClient::new(&config.polymarket.gamma_url, &config.polymarket.clob_url);
+    // Use config.markets.enabled to build window filter when CLI is --window all
+    let effective_window = match cli.window {
+        cli::WindowFilter::All => cli::WindowFilter::from_enabled(&config.markets.enabled),
+        ref w => w.clone(),
+    };
     let fetcher = MarketFetcher::new(
         fetcher_client,
         cli.asset.clone(),
-        cli.window.clone(),
+        effective_window,
         config.polymarket.poll_interval_secs,
         config.strategy.max_spread,
     );
@@ -254,6 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 settle_tx,
                 fetcher_db_tx,
                 fetcher_shutdown,
+                restored_markets,
             )
             .await;
     });
@@ -428,6 +437,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Update decision actor's bankroll after settlements
                         let _ = exec_bankroll_tx.try_send(
                             DecisionInput::BankrollUpdate(executor.bankroll()),
+                        );
+                        // Notify decision actor that this market's position is closed
+                        let _ = exec_bankroll_tx.try_send(
+                            DecisionInput::PositionClosed(cmd.market_id.clone()),
                         );
                     }
                 }

@@ -58,7 +58,7 @@ fn test_stealth_cap_no_change() {
 fn test_decide_skip_low_confidence() {
     let result = decide(
         0.65, 0.50, 0.05, 100_000.0, 0.5, 100_000.0, 50_000.0, 0.02, 0.10, 0.60, 0.30,
-        "mkt-1", 0.48, 0.52, "",
+        "mkt-1", 0.48, 0.52, "", 0.50,
     );
     assert!(result.is_err());
 }
@@ -67,7 +67,7 @@ fn test_decide_skip_low_confidence() {
 fn test_decide_trade_succeeds() {
     let result = decide(
         0.65, 0.50, 0.05, 100_000.0, 0.5, 100_000.0, 50_000.0, 0.02, 0.10, 0.20, 0.30,
-        "mkt-1", 0.48, 0.52, "",
+        "mkt-1", 0.48, 0.52, "", 0.95,
     );
     assert!(result.is_ok());
     let dec = result.unwrap();

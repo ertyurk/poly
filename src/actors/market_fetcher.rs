@@ -21,6 +21,7 @@ pub struct MarketFetcher {
 /// Tracked market state for the fetcher.
 struct TrackedMarket {
     market_id: String,
+    condition_id: String,
     asset: Asset,
     window: Window,
     token_yes: String,
@@ -59,9 +60,51 @@ impl MarketFetcher {
         settle_tx: mpsc::Sender<SettleCommand>,
         db_tx: mpsc::Sender<DbEvent>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
+        restored_markets: Vec<crate::db::queries::RestoredMarket>,
     ) {
         let mut tracked: HashMap<String, TrackedMarket> = HashMap::new();
         let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Seed tracked map with markets from restored open positions so they can be
+        // resolved even if they no longer appear in discovery.
+        for rm in restored_markets {
+            let asset = match rm.asset.as_str() {
+                "BTC" => Asset::BTC,
+                "ETH" => Asset::ETH,
+                _ => continue,
+            };
+            let window = match rm.window.as_str() {
+                "5m" => Window::FiveMin,
+                "15m" => Window::FifteenMin,
+                "1h" => Window::Hourly,
+                "1d" => Window::Daily,
+                _ => continue,
+            };
+            tracing::info!(
+                market = %rm.market_id,
+                condition_id = %rm.condition_id,
+                "seeded tracked market from restored position"
+            );
+            tracked.insert(
+                rm.condition_id.clone(),
+                TrackedMarket {
+                    market_id: rm.market_id,
+                    condition_id: rm.condition_id,
+                    asset,
+                    window,
+                    token_yes: rm.token_yes,
+                    token_no: rm.token_no,
+                    resolution_ts: rm.resolution_ts,
+                    open_ts: rm.open_ts,
+                    open_price: rm.open_price,
+                    volume_24h: 0.0,
+                    market_type: MarketType::UpDown,
+                    resolved: false,
+                    event_slug: String::new(),
+                },
+            );
+        }
+
         let mut discovery_tick = time::interval(self.poll_interval);
         let mut book_tick = time::interval(self.book_refresh);
 
@@ -256,6 +299,7 @@ impl MarketFetcher {
 
             let ms = MarketState {
                 market_id: market_id.clone(),
+                condition_id: condition_id.to_string(),
                 asset,
                 window,
                 token_yes: token_yes.clone(),
@@ -279,6 +323,7 @@ impl MarketFetcher {
                 condition_id.to_string(),
                 TrackedMarket {
                     market_id: market_id.clone(),
+                    condition_id: condition_id.to_string(),
                     asset,
                     window,
                     token_yes,
@@ -320,6 +365,7 @@ impl MarketFetcher {
 
             let ms = MarketState {
                 market_id: tm.market_id.clone(),
+                condition_id: tm.condition_id.clone(),
                 asset: tm.asset,
                 window: tm.window,
                 token_yes: tm.token_yes.clone(),
@@ -375,16 +421,15 @@ impl MarketFetcher {
                         side
                     } else {
                         // Market exists but no winner yet — retry next cycle
-                        tracing::debug!(
+                        tracing::info!(
                             condition_id = %cid,
-                            tokens = ?cm.tokens,
                             "no winner flag set yet, deferring settlement"
                         );
                         continue;
                     }
                 }
                 Ok(None) => {
-                    tracing::debug!(condition_id = %cid, "CLOB market not found");
+                    tracing::info!(condition_id = %cid, "CLOB market not found for resolution");
                     continue;
                 }
                 Err(e) => {

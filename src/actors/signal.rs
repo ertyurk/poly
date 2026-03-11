@@ -2,27 +2,34 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::flow::FlowTracker;
 use crate::types::*;
 
 /// Minimum fraction of window elapsed before emitting signals.
-/// At 50% elapsed: enough data for directional signal with less time
-/// for reversals. Market may still have edge available.
-const MIN_ELAPSED_PCT: f64 = 0.50;
+/// At 20% elapsed: allows early momentum entries which win 71% vs 22%
+/// for mid-window entries. Early entry = more time for displacement to
+/// persist and less chance of mean-reversion killing the position.
+const MIN_ELAPSED_PCT: f64 = 0.20;
 
 /// Initial per-second volatility estimate (~2.5% daily for BTC).
 const INITIAL_VOL: f64 = 0.00008;
 
-/// Minimum volatility floor to prevent division by near-zero.
-const MIN_VOL: f64 = 0.00002;
+/// Minimum volatility floor — prevents overconfidence during quiet periods.
+/// 0.00005 per-second ≈ 33% annualized. Below this, vol estimate is unreliable.
+const MIN_VOL: f64 = 0.00005;
 
 /// Minimum valid updates before emitting signals (~30 seconds of data).
 const MIN_TICKS: u32 = 30;
 
-/// Safety margin on realized volatility to prevent overconfidence.
-/// EWM variance from noisy tick data tends to underestimate true vol;
-/// this multiplier inflates σ so the model produces more conservative
-/// probability estimates (smaller z-scores → p_hat closer to 0.5).
-const VOL_SAFETY_MARGIN: f64 = 1.3;
+/// Safety margin on realized volatility.
+/// Set to 1.0 because tail risk is now handled by the Student-t CDF
+/// (fat_tail_cdf) instead of crude vol inflation. The old value of 1.3
+/// compressed p_hat toward 0.5, causing systematic NO-bias in trending markets.
+const VOL_SAFETY_MARGIN: f64 = 1.0;
+
+/// Slow variance lambda divisor: slow_vol_lambda = lambda / SLOW_VOL_FACTOR.
+/// Factor of 6 → slow vol half-life is 6× longer than fast vol (~30 min).
+const SLOW_VOL_FACTOR: f64 = 6.0;
 
 /// Slow drift lambda divisor: slow_lambda = spot_lambda / SLOW_DRIFT_FACTOR.
 /// Factor of 4 → slow drift half-life is 4× longer than fast drift.
@@ -33,13 +40,28 @@ const VOL_SAFETY_MARGIN: f64 = 1.3;
 const SLOW_DRIFT_FACTOR: f64 = 4.0;
 
 // ---------------------------------------------------------------------------
-// Log-normal probability model (for Above/Below/Between markets)
+// Fat-tailed probability model (Student-t adjusted log-normal)
 // ---------------------------------------------------------------------------
 
-/// Logistic approximation of standard normal CDF: Φ(x) ≈ 1/(1 + exp(-1.7x))
+/// Degrees of freedom for Student-t tail adjustment.
+/// Lower ν = fatter tails = more conservative at extremes.
+/// ν=4 matches empirical crypto return distributions well:
+/// - Moderate z-scores (|z| < 2): behaves like normal CDF
+/// - Extreme z-scores (|z| > 3): stays further from 0/1, accounting
+///   for liquidation cascades and flash crashes
+const TAIL_NU: f64 = 4.0;
+
+/// Student-t adjusted CDF: accounts for fat tails in crypto returns.
+///
+/// Compresses extreme z-scores via `x / sqrt(1 + x²/ν)` before applying
+/// the logistic approximation. For moderate x this is nearly identical to
+/// the normal CDF; for extreme x it prevents overconfident probabilities
+/// near 0.0 or 1.0. This replaces the old VOL_SAFETY_MARGIN=1.3 approach
+/// with a principled treatment of tail risk.
 #[inline]
-fn normal_cdf_approx(x: f64) -> f64 {
-    1.0 / (1.0 + (-1.7 * x).exp())
+fn fat_tail_cdf(x: f64) -> f64 {
+    let adjusted = x / (1.0 + x * x / TAIL_NU).sqrt();
+    1.0 / (1.0 + (-1.7 * adjusted).exp())
 }
 
 /// Compute p_hat using the log-normal model (for strike-based markets).
@@ -68,14 +90,14 @@ fn compute_p_hat_lognormal(
                 return 1.0;
             }
             let d = ((current_price / strike).ln() + drift_t) / sigma_t;
-            normal_cdf_approx(d)
+            fat_tail_cdf(d)
         }
         MarketType::Below(strike) => {
             if strike <= 0.0 {
                 return 0.0;
             }
             let d = ((current_price / strike).ln() + drift_t) / sigma_t;
-            1.0 - normal_cdf_approx(d)
+            1.0 - fat_tail_cdf(d)
         }
         MarketType::Between(lo, hi) => {
             if lo <= 0.0 || hi <= 0.0 {
@@ -83,7 +105,7 @@ fn compute_p_hat_lognormal(
             }
             let d_lo = ((current_price / lo).ln() + drift_t) / sigma_t;
             let d_hi = ((current_price / hi).ln() + drift_t) / sigma_t;
-            (normal_cdf_approx(d_lo) - normal_cdf_approx(d_hi)).clamp(0.0, 1.0)
+            (fat_tail_cdf(d_lo) - fat_tail_cdf(d_hi)).clamp(0.0, 1.0)
         }
         MarketType::UpDown => {
             // UpDown = "price went up from open" = Above(open_spot_price)
@@ -91,7 +113,7 @@ fn compute_p_hat_lognormal(
                 return 0.5;
             }
             let d = ((current_price / open_spot_price).ln() + drift_t) / sigma_t;
-            normal_cdf_approx(d)
+            fat_tail_cdf(d)
         }
     }
 }
@@ -107,6 +129,8 @@ pub struct AssetTracker {
     valid_ticks: u32,
     /// Exponentially-weighted per-second variance estimate.
     variance: f64,
+    /// Slow variance EWM (~30 min half-life) for vol regime detection.
+    slow_variance: f64,
     /// Fast drift: EWM per-second drift (half-life ≈ 5 min).
     drift: f64,
     /// Slow drift: EWM per-second drift (half-life ≈ 20 min).
@@ -124,6 +148,7 @@ impl AssetTracker {
             last_ts: 0,
             valid_ticks: 0,
             variance: INITIAL_VOL * INITIAL_VOL,
+            slow_variance: INITIAL_VOL * INITIAL_VOL,
             drift: 0.0,
             slow_drift: 0.0,
             lambda,
@@ -159,6 +184,13 @@ impl AssetTracker {
             self.slow_drift =
                 (1.0 - slow_alpha) * self.slow_drift + slow_alpha * ret_per_sec;
 
+            // Slow variance EWM (~30 min half-life)
+            let slow_vol_lambda = self.lambda / SLOW_VOL_FACTOR;
+            let slow_vol_alpha =
+                (1.0 - (-slow_vol_lambda * dt_secs).exp()).clamp(0.001, 0.5);
+            self.slow_variance =
+                (1.0 - slow_vol_alpha) * self.slow_variance + slow_vol_alpha * var_sample;
+
             self.last_price = price;
             self.last_ts = ts;
             self.valid_ticks += 1;
@@ -171,12 +203,22 @@ impl AssetTracker {
         self.variance.sqrt().max(MIN_VOL)
     }
 
+    fn slow_vol_per_sec(&self) -> f64 {
+        self.slow_variance.sqrt().max(MIN_VOL)
+    }
+
     fn drift_per_sec(&self) -> f64 {
         self.drift
     }
 
     fn slow_drift_per_sec(&self) -> f64 {
         self.slow_drift
+    }
+
+    fn vol_regime(&self) -> f64 {
+        let fast = self.variance.sqrt().max(MIN_VOL);
+        let slow = self.slow_variance.sqrt().max(MIN_VOL);
+        fast / slow
     }
 
     fn current_price(&self) -> f64 {
@@ -194,6 +236,7 @@ impl AssetTracker {
         _drift: f64,
         _slow_drift: f64,
         lambda: f64,
+        slow_variance: f64,
     ) -> Self {
         let slow_lambda = lambda / SLOW_DRIFT_FACTOR;
         Self {
@@ -201,6 +244,7 @@ impl AssetTracker {
             last_ts,
             valid_ticks,
             variance,
+            slow_variance,
             drift: 0.0,
             slow_drift: 0.0,
             lambda,
@@ -209,7 +253,7 @@ impl AssetTracker {
     }
 
     /// Accessors for warm-up persistence (keep fields private).
-    pub fn state_for_persist(&self) -> (f64, TsMicros, u32, f64, f64, f64, f64) {
+    pub fn state_for_persist(&self) -> (f64, TsMicros, u32, f64, f64, f64, f64, f64) {
         (
             self.last_price,
             self.last_ts,
@@ -218,6 +262,7 @@ impl AssetTracker {
             self.drift,
             self.slow_drift,
             self.lambda,
+            self.slow_variance,
         )
     }
 }
@@ -258,7 +303,7 @@ impl SignalActor {
 
     pub async fn run(
         mut self,
-        mut spot_rx: mpsc::Receiver<SpotPrice>,
+        mut spot_rx: mpsc::Receiver<SpotTick>,
         mut market_rx: mpsc::Receiver<MarketState>,
         signal_tx: mpsc::Sender<Signal>,
         db_tx: mpsc::Sender<DbEvent>,
@@ -278,6 +323,9 @@ impl SignalActor {
                 "restored signal state from previous session"
             );
         }
+        // Per-asset flow tracking (order flow imbalance, volume regime)
+        let mut flow_trackers: HashMap<Asset, FlowTracker> = HashMap::new();
+
         // Per-market metadata
         let mut market_meta: HashMap<String, MarketMeta> = HashMap::new();
         // Per-market spot open prices (first spot price seen after market discovery)
@@ -292,7 +340,7 @@ impl SignalActor {
                 _ = shutdown.changed() => {
                     tracing::info!("signal actor shutting down — persisting state");
                     for (asset, tracker) in &asset_trackers {
-                        let (last_price, last_ts, valid_ticks, variance, drift, slow_drift, lam) =
+                        let (last_price, last_ts, valid_ticks, variance, drift, slow_drift, lam, slow_var) =
                             tracker.state_for_persist();
                         if valid_ticks > 0 {
                             let _ = db_tx.try_send(DbEvent::SaveSignalState {
@@ -304,6 +352,7 @@ impl SignalActor {
                                 drift,
                                 slow_drift,
                                 lambda: lam,
+                                slow_variance: slow_var,
                             });
                         }
                     }
@@ -320,47 +369,74 @@ impl SignalActor {
                     });
                 }
 
-                Some(spot) = spot_rx.recv() => {
+                Some(tick) = spot_rx.recv() => {
                     // Update per-asset tracker (vol/drift estimation)
                     let tracker = asset_trackers
-                        .entry(spot.asset)
+                        .entry(tick.asset)
                         .or_insert_with(|| AssetTracker::new(lambda));
 
-                    let ready = tracker.update(spot.price, spot.ts);
+                    let ready = tracker.update(tick.price, tick.ts);
                     if !ready {
                         continue;
                     }
 
-                    // Safety margin on vol prevents overconfidence from noisy
-                    // EWM variance estimates. Higher vol → wider σ√T →
-                    // smaller z-score → more conservative p_hat.
-                    let vol = tracker.vol_per_sec() * VOL_SAFETY_MARGIN;
+                    // Update per-asset flow tracker (OFI, volume regime)
+                    let flow = flow_trackers
+                        .entry(tick.asset)
+                        .or_insert_with(FlowTracker::new);
+                    flow.update(tick.qty, tick.buyer_is_maker, tick.ts);
+
+                    // Use max(fast, slow) vol to prevent overconfidence during
+                    // quiet periods. Fast vol (~5 min half-life) drops quickly
+                    // during lulls; slow vol (~30 min half-life) is more stable.
+                    let vol = tracker.vol_per_sec()
+                        .max(tracker.slow_vol_per_sec())
+                        * VOL_SAFETY_MARGIN;
+
+                    // Extract values from tracker before releasing mutable borrow
+                    // (needed so we can immutably borrow asset_trackers for cross-asset)
+                    let current_price = tracker.current_price();
+                    let drift = tracker.drift_per_sec();
+                    let slow_drift = tracker.slow_drift_per_sec();
+                    let n_obs = tracker.state_for_persist().2;
+                    let vol_regime = tracker.vol_regime();
+
+                    // Get flow snapshot (release mutable borrow on flow_trackers)
+                    let flow_snap = if let Some(ft) = flow_trackers.get(&tick.asset) {
+                        ft.snapshot(tick.ts)
+                    } else {
+                        crate::flow::FlowSnapshot {
+                            ofi_10s: 0.0,
+                            vol_ratio: 1.0,
+                            large_trade: false,
+                        }
+                    };
 
                     // Emit signals for all markets tracking this asset
                     for (market_id, meta) in &market_meta {
-                        if meta.asset != spot.asset {
+                        if meta.asset != tick.asset {
                             continue;
                         }
-                        if spot.ts >= meta.resolution_ts {
+                        if tick.ts >= meta.resolution_ts {
                             continue;
                         }
 
                         // Capture open spot price — must be AFTER the market's
                         // open_ts so we use the same reference the market uses.
                         // If the current spot tick is before market open, skip.
-                        if spot.ts < meta.open_ts {
+                        if tick.ts < meta.open_ts {
                             continue;
                         }
                         let open_spot = *open_spot_prices
                             .entry(market_id.clone())
-                            .or_insert(spot.price);
+                            .or_insert(tick.price);
 
                         // Only emit signals after enough of the window has elapsed.
                         // Trading later = more data = higher accuracy.
                         let total_duration =
                             (meta.resolution_ts - meta.open_ts) as f64;
                         let elapsed_us =
-                            (spot.ts - meta.open_ts) as f64;
+                            (tick.ts - meta.open_ts) as f64;
                         if total_duration > 0.0
                             && (elapsed_us / total_duration) < MIN_ELAPSED_PCT
                         {
@@ -369,52 +445,92 @@ impl SignalActor {
 
                         // Throttle: 1 signal/sec/market
                         let prev = last_signal_ts.get(market_id).copied().unwrap_or(0);
-                        if (spot.ts - prev) < 1_000_000 {
+                        if (tick.ts - prev) < 1_000_000 {
                             continue;
                         }
-                        last_signal_ts.insert(market_id.clone(), spot.ts);
+                        last_signal_ts.insert(market_id.clone(), tick.ts);
 
                         let time_to_expiry =
-                            ((meta.resolution_ts - spot.ts) as f64) / 1_000_000.0;
+                            ((meta.resolution_ts - tick.ts) as f64) / 1_000_000.0;
 
                         // Unified log-normal model for all market types.
                         // For UpDown: treats as Above(open_spot) — natural time decay.
-                        let drift = tracker.drift_per_sec();
                         let p_hat = compute_p_hat_lognormal(
-                            tracker.current_price(),
+                            current_price,
                             meta.market_type,
                             open_spot,
                             vol,
                             drift,
                             time_to_expiry,
                         );
-                        let n_obs = tracker.state_for_persist().2;
 
                         // Dual-timescale drift alignment: require BOTH fast
                         // drift (~5 min) AND slow drift (~20 min) to agree
                         // with the signal direction. Prevents short-term
                         // bounces from triggering bets against the prevailing
                         // trend (e.g., YES bets during a broader downtrend).
+                        //
+                        // Task 7: Relax slow drift requirement when OFI
+                        // confirms the signal direction with strong flow.
                         let signal_says_up = p_hat > 0.5;
-                        let slow_drift = tracker.slow_drift_per_sec();
                         let fast_agrees = (drift > 0.0) == signal_says_up;
                         let slow_agrees = (slow_drift > 0.0) == signal_says_up;
-                        if !fast_agrees || !slow_agrees {
+
+                        let ofi_agrees = if signal_says_up {
+                            flow_snap.ofi_10s > 0.5
+                        } else {
+                            flow_snap.ofi_10s < -0.5
+                        };
+                        let flow_override = ofi_agrees && flow_snap.vol_ratio > 1.5;
+
+                        if !fast_agrees || (!slow_agrees && !flow_override) {
                             tracing::debug!(
                                 market = %market_id,
                                 p_hat = format_args!("{p_hat:.4}"),
                                 drift = format_args!("{drift:.2e}"),
                                 slow_drift = format_args!("{slow_drift:.2e}"),
+                                ofi_10s = format_args!("{:.2}", flow_snap.ofi_10s),
+                                vol_ratio = format_args!("{:.2}", flow_snap.vol_ratio),
                                 fast_agrees,
                                 slow_agrees,
+                                flow_override,
                                 "signal blocked by drift alignment"
                             );
                             continue;
                         }
 
+                        // Compute elapsed_pct for this market
+                        let elapsed_pct = if total_duration > 0.0 {
+                            elapsed_us / total_duration
+                        } else {
+                            0.0
+                        };
 
+                        // Cross-asset lead-lag signal (Task 5)
+                        let cross_asset_signal = {
+                            let other_asset = match meta.asset {
+                                Asset::BTC => Asset::ETH,
+                                Asset::ETH => Asset::BTC,
+                            };
+                            if let Some(other_tracker) =
+                                asset_trackers.get(&other_asset)
+                            {
+                                let other_drift = other_tracker.drift_per_sec();
+                                (other_drift / (INITIAL_VOL * 0.5)).tanh()
+                            } else {
+                                0.0
+                            }
+                        };
 
                         let confidence = (p_hat - 0.5).abs() * 2.0;
+
+                        // Raw displacement from open price (%).
+                        // Positive = spot above open, negative = below.
+                        let displacement_pct = if open_spot > 0.0 {
+                            (current_price / open_spot - 1.0) * 100.0
+                        } else {
+                            0.0
+                        };
 
                         let sig = Signal {
                             market_id: market_id.clone(),
@@ -422,7 +538,14 @@ impl SignalActor {
                             confidence,
                             prior: 0.5,
                             n_observations: n_obs,
-                            ts: spot.ts,
+                            ts: tick.ts,
+                            ofi_10s: flow_snap.ofi_10s,
+                            vol_ratio: flow_snap.vol_ratio,
+                            large_trade: flow_snap.large_trade,
+                            vol_regime,
+                            cross_asset_signal,
+                            elapsed_pct,
+                            displacement_pct,
                         };
 
                         tracing::debug!(
@@ -430,6 +553,8 @@ impl SignalActor {
                             p_hat = format_args!("{p_hat:.4}"),
                             confidence = format_args!("{confidence:.4}"),
                             drift = format_args!("{drift:.2e}"),
+                            vol_regime = format_args!("{vol_regime:.2}"),
+                            ofi_10s = format_args!("{:.2}", flow_snap.ofi_10s),
                             "signal emitted"
                         );
                         let _ = db_tx.try_send(DbEvent::Signal(sig.clone()));

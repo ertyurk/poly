@@ -14,11 +14,15 @@ struct BinanceTrade {
     symbol: String,
     #[serde(rename = "p")]
     price: String,
+    #[serde(rename = "q")]
+    qty: String,
+    #[serde(rename = "m")]
+    buyer_is_maker: bool,
     #[serde(rename = "T")]
     trade_time: i64,
 }
 
-pub fn parse_binance_trade(msg: &str) -> Option<SpotPrice> {
+pub fn parse_binance_tick(msg: &str) -> Option<SpotTick> {
     let trade: BinanceTrade = serde_json::from_str(msg).ok()?;
     let asset = match trade.symbol.as_str() {
         "BTCUSDT" => Asset::BTC,
@@ -26,10 +30,13 @@ pub fn parse_binance_trade(msg: &str) -> Option<SpotPrice> {
         _ => return None,
     };
     let price: f64 = trade.price.parse().ok()?;
-    Some(SpotPrice {
+    let qty: f64 = trade.qty.parse().ok()?;
+    Some(SpotTick {
         asset,
         price,
         ts: trade.trade_time * MS_TO_MICROS,
+        qty,
+        buyer_is_maker: trade.buyer_is_maker,
     })
 }
 
@@ -44,7 +51,7 @@ impl IngestActor {
 
     pub async fn run(
         &self,
-        spot_tx: mpsc::Sender<SpotPrice>,
+        spot_tx: mpsc::Sender<SpotTick>,
         db_tx: mpsc::Sender<DbEvent>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
@@ -69,10 +76,10 @@ impl IngestActor {
                             msg = read.next() => {
                                 match msg {
                                     Some(Ok(Message::Text(text))) => {
-                                        if let Some(sp) = parse_binance_trade(&text) {
-                                            // SpotPrice is Copy, no clone needed
+                                        if let Some(tick) = parse_binance_tick(&text) {
+                                            let sp = SpotPrice { asset: tick.asset, price: tick.price, ts: tick.ts };
                                             let _ = db_tx.try_send(DbEvent::SpotPrice(sp));
-                                            let _ = spot_tx.try_send(sp);
+                                            let _ = spot_tx.try_send(tick);
                                         }
                                     }
                                     Some(Ok(Message::Close(_))) | None => {

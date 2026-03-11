@@ -161,6 +161,7 @@ impl WriterActor {
                     drift,
                     slow_drift,
                     lambda,
+                    slow_variance,
                 } => {
                     let state = db::queries::SavedSignalState {
                         asset: asset.clone(),
@@ -171,6 +172,7 @@ impl WriterActor {
                         drift: *drift,
                         slow_drift: *slow_drift,
                         lambda: *lambda,
+                        slow_variance: *slow_variance,
                     };
                     db::queries::save_signal_state(&tx, &state, crate::types::now_micros())?;
                 }

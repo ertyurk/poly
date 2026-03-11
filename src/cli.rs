@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::collections::HashSet;
 
 use crate::types::{Asset, Window};
 
@@ -40,6 +41,7 @@ pub enum AssetFilter {
 #[derive(Debug, Clone)]
 pub enum WindowFilter {
     Single(Window),
+    Set(HashSet<Window>),
     All,
 }
 
@@ -57,6 +59,30 @@ impl WindowFilter {
         match self {
             Self::All => true,
             Self::Single(w) => *w == window,
+            Self::Set(s) => s.contains(&window),
+        }
+    }
+
+    /// Build a WindowFilter from the `markets.enabled` config entries.
+    /// Entries like "BTC_5m", "ETH_15m" → extract unique windows.
+    pub fn from_enabled(entries: &[String]) -> Self {
+        let windows: HashSet<Window> = entries
+            .iter()
+            .filter_map(|e| {
+                let suffix = e.split('_').nth(1)?;
+                match suffix {
+                    "5m" => Some(Window::FiveMin),
+                    "15m" => Some(Window::FifteenMin),
+                    "1h" => Some(Window::Hourly),
+                    "1d" => Some(Window::Daily),
+                    _ => None,
+                }
+            })
+            .collect();
+        if windows.is_empty() {
+            Self::All
+        } else {
+            Self::Set(windows)
         }
     }
 }

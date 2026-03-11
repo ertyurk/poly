@@ -633,6 +633,7 @@ mod tests {
 
         let settled_market = MarketState {
             market_id: "btc_5m_settled".into(),
+            condition_id: "0xabc123".into(),
             asset: Asset::BTC,
             window: Window::FiveMin,
             token_yes: "yes-token".into(),
@@ -660,6 +661,7 @@ mod tests {
 
         let open_market = MarketState {
             market_id: "eth_5m_open".into(),
+            condition_id: "0xdef456".into(),
             asset: Asset::ETH,
             window: Window::FiveMin,
             token_yes: "yes-open".into(),

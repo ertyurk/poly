@@ -25,6 +25,7 @@ async fn test_full_pipeline_paper_trade() {
         0.48, // best_bid
         0.52, // best_ask
         "",   // event_slug
+        0.95, // max_fill_price
     );
 
     let decision = result.expect("expected a trade decision, got skip");
@@ -73,6 +74,7 @@ fn test_full_pipeline_skip_low_edge() {
         0.48, // best_bid
         0.52, // best_ask
         "",   // event_slug
+        0.95, // max_fill_price
     );
 
     assert!(

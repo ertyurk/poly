@@ -21,7 +21,7 @@ initial = 100.0
 # A higher value means fewer but higher-conviction trades.
 # edge must exceed tau_min + effective_spread to pass the entry gate.
 # Set low (0.02) for paper trading to see more activity; increase for live.
-tau_min = 0.02
+tau_min = 0.05
 
 # Fraction of full Kelly criterion to use for position sizing.
 # 0.25 = quarter-Kelly (conservative, lower variance).
@@ -60,6 +60,22 @@ max_total_exposure = 0.50
 # Markets wider than this are skipped as illiquid. Tighter = better fills.
 # 0.03 = 3¢ (tight, fewer markets), 0.05 = 5¢ (moderate), 0.10 = 10¢ (loose)
 max_spread = 0.03
+
+[strategy.adapt]
+# ADAPT composite score weights (must sum to 1.0)
+w_zscore = 0.50
+w_ofi = 0.25
+w_cross = 0.15
+w_volume = 0.10
+# Regime-adjusted minimum confidence thresholds
+# Lowered because edge-at-fill-price + displacement gate are the primary filters.
+# Fat-tail CDF produces well-calibrated p_hat, so confidence thresholds can relax.
+min_confidence_quiet = 0.10
+min_confidence_normal = 0.15
+min_confidence_hot = 0.25
+# Late-window convergence: more permissive + more aggressive sizing
+late_window_pct = 0.70
+late_window_kelly_mult = 1.5
 
 [strategy.decay]
 # Exponential decay rates (lambda) for each signal source.

@@ -49,6 +49,7 @@ fn test_insert_decision_and_trade() {
 
     let ms = MarketState {
         market_id: "test-mkt-1".into(),
+        condition_id: "0xtest123".into(),
         asset: Asset::BTC,
         window: Window::FiveMin,
         token_yes: "tok_yes".into(),
