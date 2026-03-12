@@ -55,17 +55,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bankroll = if let Some(b) = cli.bankroll {
         b // explicit CLI override wins
     } else if let Ok(Some(last)) = db::queries::last_bankroll(&startup_conn) {
-        tracing::info!(bankroll = format_args!("${last:.2}"), "restored bankroll from DB");
+        tracing::info!(
+            bankroll = format_args!("${last:.2}"),
+            "restored bankroll from DB"
+        );
         last
     } else {
         config.bankroll.initial
     };
     let restored_positions = db::queries::load_open_positions(&startup_conn).unwrap_or_default();
-    let restored_markets = db::queries::load_markets_for_open_positions(&startup_conn).unwrap_or_default();
+    let restored_markets =
+        db::queries::load_markets_for_open_positions(&startup_conn).unwrap_or_default();
     let next_decision_id = db::queries::max_decision_id(&startup_conn).unwrap_or(0) + 1;
     drop(startup_conn);
 
-    tracing::info!(mode = mode_str, bankroll = format_args!("${bankroll:.2}"), "loaded config");
+    tracing::info!(
+        mode = mode_str,
+        bankroll = format_args!("${bankroll:.2}"),
+        "loaded config"
+    );
 
     // 7. Build LiveTrader for order execution (live mode only)
     let live_trader: Option<LiveTrader> = if paper_trade {
@@ -268,32 +276,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Telegram alert actor (optional — only spawned if configured and enabled)
-    let (telegram_tx, tg_stats): (Option<mpsc::Sender<TelegramAlert>>, Option<Arc<TelegramStats>>) =
-        if let Some(ref tg) = config.telegram {
-            if tg.enabled {
-                let stats = Arc::new(TelegramStats::new(bankroll));
-                let (tg_tx, tg_rx) = mpsc::channel::<TelegramAlert>(100);
-                let actor = TelegramActor::new(
-                    tg.bot_token.clone(),
-                    tg.chat_id.clone(),
-                    tg.summary_interval_mins,
-                    Arc::clone(&stats),
-                );
-                let tg_shutdown = shutdown_rx.clone();
-                tokio::spawn(async move {
-                    actor.run(tg_rx, tg_shutdown).await;
-                });
-                tracing::info!(
-                    summary_interval_mins = tg.summary_interval_mins,
-                    "telegram alerts enabled with periodic summary"
-                );
-                (Some(tg_tx), Some(stats))
-            } else {
-                (None, None)
-            }
+    let (telegram_tx, tg_stats): (
+        Option<mpsc::Sender<TelegramAlert>>,
+        Option<Arc<TelegramStats>>,
+    ) = if let Some(ref tg) = config.telegram {
+        if tg.enabled {
+            let stats = Arc::new(TelegramStats::new(bankroll));
+            let (tg_tx, tg_rx) = mpsc::channel::<TelegramAlert>(100);
+            let actor = TelegramActor::new(
+                tg.bot_token.clone(),
+                tg.chat_id.clone(),
+                tg.summary_interval_mins,
+                Arc::clone(&stats),
+            );
+            let tg_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                actor.run(tg_rx, tg_shutdown).await;
+            });
+            tracing::info!(
+                summary_interval_mins = tg.summary_interval_mins,
+                "telegram alerts enabled with periodic summary"
+            );
+            (Some(tg_tx), Some(stats))
         } else {
             (None, None)
-        };
+        }
+    } else {
+        (None, None)
+    };
     let exec_tg_stats = tg_stats.clone();
 
     // Executor task — handles fills + settlements, returns stats
@@ -302,8 +312,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exec_bankroll_tx = bankroll_tx;
     let exec_handle = tokio::spawn(async move {
         let exec_mode = if paper_trade { Mode::Paper } else { Mode::Live };
-        let mut executor =
-            Executor::new(exec_mode, bankroll, live_trader, config.strategy.max_total_exposure);
+        let mut executor = Executor::new(
+            exec_mode,
+            bankroll,
+            live_trader,
+            config.strategy.max_total_exposure,
+        );
         executor.set_next_decision_id(next_decision_id);
 
         // Restore open positions from previous session
@@ -331,6 +345,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        let execution_config = config.execution.clone();
+        let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            execution_config.order_poll_interval_secs,
+        ));
+        poll_interval.tick().await;
+
         let mut trades_placed: u32 = 0;
         let mut trades_skipped: u32 = 0;
         let mut fill_rejections: u32 = 0;
@@ -345,51 +365,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Register market tokens with executor
                 msg = market_reg_rx.recv() => {
                     if let Some(ms) = msg {
-                        executor.register_market(&ms.market_id, &ms.token_yes, &ms.token_no);
+                        executor.register_market(
+                            &ms.market_id,
+                            &ms.token_yes,
+                            &ms.token_no,
+                            ms.resolution_ts,
+                        );
                     }
                 }
 
                 msg = decision_out_rx.recv() => {
                     match msg {
                         Some(DecisionOutput::Trade(dec)) => {
-                            match executor.try_fill(&dec, dec.best_ask, dec.best_bid).await {
-                                Ok(fill) => {
-                                    trades_placed += 1;
-                                    if let Some(ref stats) = exec_tg_stats {
-                                        stats.record_fill();
+                            if exec_mode == Mode::Live {
+                                let res_ts = executor.market_resolution_ts(
+                                    &dec.market_id,
+                                );
+                                match executor.try_place_gtd(
+                                    &dec,
+                                    dec.best_ask,
+                                    dec.best_bid,
+                                    execution_config.gtd_expiry_secs,
+                                    res_ts,
+                                    execution_config.min_time_before_resolution_secs,
+                                ).await {
+                                    Ok(_order_id) => {
+                                        trades_placed += 1;
+                                        if let Some(ref stats) = exec_tg_stats {
+                                            stats.record_fill();
+                                        }
+                                        let _ = exec_db_tx.try_send(
+                                            DbEvent::Decision(dec),
+                                        );
+                                        let _ = exec_bankroll_tx.try_send(
+                                            DecisionInput::BankrollUpdate(
+                                                executor.bankroll(),
+                                            ),
+                                        );
                                     }
-                                    if let Some(ref tg) = telegram_tx {
-                                        let _ = tg.try_send(TelegramAlert::TradeFilled {
-                                            decision: dec.clone(),
-                                            fill_price: fill.fill_price,
-                                        });
+                                    Err(reason) => {
+                                        fill_rejections += 1;
+                                        let _ = exec_db_tx.try_send(
+                                            DbEvent::FillRejection {
+                                                market_id: dec.market_id.clone(),
+                                                side: dec.side,
+                                                size: dec.size_usd,
+                                                price: dec.price,
+                                                reason,
+                                                ts: dec.ts,
+                                            },
+                                        );
                                     }
-                                    let _ = exec_db_tx.try_send(DbEvent::SaveOpenPosition {
-                                        decision_id: fill.decision_id,
-                                        market_id: dec.market_id.clone(),
-                                        side: dec.side,
-                                        entry_price: fill.fill_price,
-                                        size: fill.size_shares,
-                                        fee_rate: dec.fee_rate,
-                                        entry_ts: dec.ts,
-                                        estimated_slippage: fill.estimated_slippage,
-                                    });
-                                    let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
-                                    // Update decision actor's bankroll after committing capital
-                                    let _ = exec_bankroll_tx.try_send(
-                                        DecisionInput::BankrollUpdate(executor.bankroll()),
-                                    );
                                 }
-                                Err(reason) => {
-                                    fill_rejections += 1;
-                                    let _ = exec_db_tx.try_send(DbEvent::FillRejection {
-                                        market_id: dec.market_id.clone(),
-                                        side: dec.side,
-                                        size: dec.size_usd,
-                                        price: dec.price,
-                                        reason,
-                                        ts: dec.ts,
-                                    });
+                            } else {
+                                // Paper mode: use existing try_fill path
+                                match executor.try_fill(
+                                    &dec, dec.best_ask, dec.best_bid,
+                                ).await {
+                                    Ok(fill) => {
+                                        trades_placed += 1;
+                                        if let Some(ref stats) = exec_tg_stats {
+                                            stats.record_fill();
+                                        }
+                                        if let Some(ref tg) = telegram_tx {
+                                            let _ = tg.try_send(
+                                                TelegramAlert::TradeFilled {
+                                                    decision: dec.clone(),
+                                                    fill_price: fill.fill_price,
+                                                },
+                                            );
+                                        }
+                                        let _ = exec_db_tx.try_send(
+                                            DbEvent::SaveOpenPosition {
+                                                decision_id: fill.decision_id,
+                                                market_id: dec.market_id.clone(),
+                                                side: dec.side,
+                                                entry_price: fill.fill_price,
+                                                size: fill.size_shares,
+                                                fee_rate: dec.fee_rate,
+                                                entry_ts: dec.ts,
+                                                estimated_slippage:
+                                                    fill.estimated_slippage,
+                                            },
+                                        );
+                                        let _ = exec_db_tx.try_send(
+                                            DbEvent::Decision(dec),
+                                        );
+                                        let _ = exec_bankroll_tx.try_send(
+                                            DecisionInput::BankrollUpdate(
+                                                executor.bankroll(),
+                                            ),
+                                        );
+                                    }
+                                    Err(reason) => {
+                                        fill_rejections += 1;
+                                        let _ = exec_db_tx.try_send(
+                                            DbEvent::FillRejection {
+                                                market_id: dec.market_id.clone(),
+                                                side: dec.side,
+                                                size: dec.size_usd,
+                                                price: dec.price,
+                                                reason,
+                                                ts: dec.ts,
+                                            },
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -445,7 +525,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                _ = poll_interval.tick(), if exec_mode == Mode::Live => {
+                    let completed = executor.poll_active_orders(
+                        execution_config.gtd_expiry_secs,
+                        execution_config.max_signal_age_secs,
+                        execution_config.fok_price_bump,
+                    ).await;
+                    for (market_id, filled) in completed {
+                        if filled {
+                            trades_placed += 1;
+                            if let Some(ref stats) = exec_tg_stats {
+                                stats.record_fill();
+                            }
+                            let _ = exec_bankroll_tx.try_send(
+                                DecisionInput::BankrollUpdate(
+                                    executor.bankroll(),
+                                ),
+                            );
+                        } else {
+                            fill_rejections += 1;
+                            // Order failed — free the market for new decisions
+                            let _ = exec_bankroll_tx.try_send(
+                                DecisionInput::PositionClosed(
+                                    market_id,
+                                ),
+                            );
+                        }
+                    }
+                }
+
                 _ = exec_shutdown.changed() => {
+                    executor.cancel_all_active_orders().await;
                     // Drain remaining settle commands
                     while let Ok(cmd) = settle_rx.try_recv() {
                         markets_resolved += 1;
