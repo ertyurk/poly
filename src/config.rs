@@ -10,6 +10,8 @@ pub struct Config {
     pub polymarket: Polymarket,
     pub writer: Writer,
     pub telegram: Option<Telegram>,
+    #[serde(default)]
+    pub execution: Execution,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -159,6 +161,54 @@ pub struct Telegram {
 
 const fn default_summary_interval() -> u64 {
     30
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Execution {
+    /// GTD order expiry in seconds (Phase 1 duration).
+    #[serde(default = "default_gtd_expiry")]
+    pub gtd_expiry_secs: u64,
+    /// Maximum signal age (seconds) before FOK fallback is skipped.
+    #[serde(default = "default_max_signal_age")]
+    pub max_signal_age_secs: u64,
+    /// Price bump (in price units) for FOK fallback above/below the book.
+    #[serde(default = "default_fok_price_bump")]
+    pub fok_price_bump: f64,
+    /// Minimum seconds before market resolution to place any order.
+    #[serde(default = "default_min_time_before_resolution")]
+    pub min_time_before_resolution_secs: u64,
+    /// How often (seconds) to poll order status while GTD is resting.
+    #[serde(default = "default_order_poll_interval")]
+    pub order_poll_interval_secs: u64,
+}
+
+fn default_gtd_expiry() -> u64 {
+    15
+}
+fn default_max_signal_age() -> u64 {
+    20
+}
+fn default_fok_price_bump() -> f64 {
+    0.01
+}
+fn default_min_time_before_resolution() -> u64 {
+    60
+}
+fn default_order_poll_interval() -> u64 {
+    3
+}
+
+impl Default for Execution {
+    fn default() -> Self {
+        Self {
+            gtd_expiry_secs: default_gtd_expiry(),
+            max_signal_age_secs: default_max_signal_age(),
+            fok_price_bump: default_fok_price_bump(),
+            min_time_before_resolution_secs:
+                default_min_time_before_resolution(),
+            order_poll_interval_secs: default_order_poll_interval(),
+        }
+    }
 }
 
 fn default_max_spread() -> f64 {
