@@ -16,6 +16,18 @@ pub enum TelegramAlert {
         fill_price: f64,
     },
     TradeSettled(TradeResult),
+    GtdOrderPosted {
+        market_id: String,
+        side: Side,
+        price: f64,
+        expiry_secs: u64,
+    },
+    GtdOrderFilled {
+        market_id: String,
+        side: Side,
+        price: f64,
+        maker: bool,
+    },
 }
 
 /// Shared stats for the periodic summary, updated atomically by the executor.
@@ -214,10 +226,7 @@ impl TelegramActor {
     }
 
     async fn send_message(&self, text: &str) -> Result<(), String> {
-        let url = format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            self.bot_token
-        );
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
 
         let resp = self
             .client
@@ -239,10 +248,7 @@ impl TelegramActor {
         }
 
         // Check Telegram API-level ok field
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("bad json: {e}"))?;
+        let body: serde_json::Value = resp.json().await.map_err(|e| format!("bad json: {e}"))?;
         if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let desc = body
                 .get("description")
@@ -257,7 +263,10 @@ impl TelegramActor {
 
 fn format_alert(alert: &TelegramAlert) -> String {
     match alert {
-        TelegramAlert::TradeFilled { decision, fill_price } => {
+        TelegramAlert::TradeFilled {
+            decision,
+            fill_price,
+        } => {
             let link = if decision.event_slug.is_empty() {
                 String::new()
             } else {
@@ -309,6 +318,29 @@ fn format_alert(alert: &TelegramAlert) -> String {
                 tr.pnl,
                 tr.fee_paid,
                 tr.bankroll_after,
+            )
+        }
+        TelegramAlert::GtdOrderPosted {
+            market_id,
+            side,
+            price,
+            expiry_secs,
+        } => {
+            format!(
+                "GTD POSTED: {side} {market_id} @ {price:.3} \
+                 (expires {expiry_secs}s)"
+            )
+        }
+        TelegramAlert::GtdOrderFilled {
+            market_id,
+            side,
+            price,
+            maker,
+        } => {
+            let maker_or_taker = if *maker { "maker" } else { "taker" };
+            format!(
+                "FILLED ({maker_or_taker}): {side} {market_id} \
+                 @ {price:.3}"
             )
         }
     }

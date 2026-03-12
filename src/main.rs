@@ -394,6 +394,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(ref stats) = exec_tg_stats {
                                             stats.record_fill();
                                         }
+                                        if let Some(ref tg) = telegram_tx {
+                                            let _ = tg.try_send(
+                                                TelegramAlert::GtdOrderPosted {
+                                                    market_id: dec
+                                                        .market_id
+                                                        .clone(),
+                                                    side: dec.side,
+                                                    price: dec.price,
+                                                    expiry_secs: execution_config
+                                                        .gtd_expiry_secs,
+                                                },
+                                            );
+                                        }
                                         let _ = exec_db_tx.try_send(
                                             DbEvent::Decision(dec),
                                         );
