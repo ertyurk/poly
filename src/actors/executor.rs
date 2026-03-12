@@ -24,8 +24,8 @@ pub struct FillResult {
 #[inline]
 fn estimate_slippage(spread: f64, size: f64) -> f64 {
     let half_spread = spread / 2.0;
-    // Assume ~$50k liquidity depth on each side for typical Polymarket crypto markets
-    const LIQUIDITY_DEPTH: f64 = 50_000.0;
+    // Assume ~$5k liquidity depth on each side for typical Polymarket crypto markets
+    const LIQUIDITY_DEPTH: f64 = 5_000.0;
     let size_impact = size / (size + LIQUIDITY_DEPTH) * 0.02; // max 2% impact
     half_spread + size_impact
 }
