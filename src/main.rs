@@ -1,20 +1,23 @@
 mod actors;
 mod cli;
 mod config;
+mod dashboard;
 mod db;
 mod flow;
 mod math;
+mod paths;
 mod polymarket;
 mod types;
 
 use actors::decision::{DecisionActor, DecisionInput, DecisionOutput};
-use actors::executor::{Executor, Mode};
+use actors::executor::{Executor, GtdResult, Mode};
 use actors::ingest::IngestActor;
 use actors::market_fetcher::MarketFetcher;
 use actors::signal::{AssetTracker, SignalActor};
 use actors::telegram::{TelegramActor, TelegramAlert, TelegramStats};
 use actors::writer::WriterActor;
-use cli::Cli;
+use cli::{Cli, Command};
+use paths::AppPaths;
 use polymarket::{LiveTrader, PolymarketClient};
 use types::*;
 
@@ -24,36 +27,381 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 
-#[allow(clippy::too_many_lines)]
+/// Private key baked in at compile time via:
+///   PRIVATE_KEY=abc123 cargo install --path .
+/// Falls back to runtime env var if not compiled in.
+const COMPILED_PRIVATE_KEY: Option<&str> = option_env!("PRIVATE_KEY");
+
+fn get_private_key() -> Result<String, String> {
+    if let Some(key) = COMPILED_PRIVATE_KEY {
+        return Ok(key.to_string());
+    }
+    std::env::var("PRIVATE_KEY")
+        .map_err(|_| "PRIVATE_KEY not set. Build with: PRIVATE_KEY=xxx cargo install --path . \
+                       Or set PRIVATE_KEY env var.".to_string())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Parse CLI
     let cli = Cli::parse();
 
-    // 2. Load .env file from current directory (if present)
+    // Load .env from ~/.polymarket-bot/ and current dir
+    let app_paths = AppPaths::resolve(cli.config.as_deref(), cli.db_path.as_deref());
+    let env_path = app_paths.root.join(".env");
+    if env_path.exists() {
+        dotenvy::from_path(&env_path).ok();
+    }
     dotenvy::dotenv().ok();
 
-    // 3. Initialize tracing
+    match cli.command {
+        Command::Crypto {
+            paper_trade,
+            bankroll,
+            asset,
+            window,
+        } => {
+            run_crypto(&app_paths, paper_trade, bankroll, asset, window).await
+        }
+        Command::Weather {
+            paper_trade,
+            bankroll,
+        } => {
+            run_weather(&app_paths, paper_trade, bankroll).await
+        }
+        Command::Dashboard { host, port } => {
+            run_dashboard(&app_paths, &host, port).await
+        }
+        Command::Status => {
+            run_status(&app_paths)
+        }
+        Command::ResetDb => {
+            run_reset_db(&app_paths)
+        }
+    }
+}
+
+// ─── Status ──────────────────────────────────────────────────────────────────
+
+fn run_status(paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = paths.db_str();
+    if !paths.db.exists() {
+        eprintln!("No database found at {db_path}");
+        eprintln!("Run `poly crypto` or `poly weather` first.");
+        return Ok(());
+    }
+
+    let conn = rusqlite::Connection::open(&db_path)?;
+
+    let (decisions, trades, rejections, spot_ticks, active_mkts): (i64, i64, i64, i64, i64) =
+        conn.query_row(
+            "SELECT
+                (SELECT count(*) FROM decisions),
+                (SELECT count(*) FROM trades),
+                (SELECT count(*) FROM fill_rejections),
+                (SELECT count(*) FROM spot_prices),
+                (SELECT count(*) FROM markets WHERE resolution_ts > strftime('%s', 'now') * 1000000)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )?;
+
+    let trade_decisions: i64 = conn.query_row(
+        "SELECT count(*) FROM decisions WHERE action='TRADE'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let (total_wins, total_losses, total_pnl): (i64, i64, f64) = conn
+        .query_row(
+            "SELECT
+                COALESCE(sum(case when outcome='WIN' then 1 else 0 end), 0),
+                COALESCE(sum(case when outcome='LOSS' then 1 else 0 end), 0),
+                COALESCE(sum(pnl), 0.0)
+            FROM trades",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap_or((0, 0, 0.0));
+
+    let bankroll: f64 = conn
+        .query_row(
+            "SELECT bankroll_after FROM trades ORDER BY resolved_ts DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .or_else(|_| {
+            // No trades yet — try to get initial bankroll from config snapshot
+            conn.query_row(
+                "SELECT json_extract(config_json, '$.bankroll.initial')
+                 FROM config_snapshots ORDER BY ts DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap_or(0.0);
+
+    let open_positions: i64 = conn
+        .query_row("SELECT count(*) FROM open_positions", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    let top_skip: String = conn
+        .query_row(
+            "SELECT COALESCE(skip_reason, 'NONE') || ' (' || count(*) || ')'
+             FROM decisions WHERE action='SKIP'
+             GROUP BY skip_reason ORDER BY count(*) DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "none".to_string());
+
+    // Truncate strings for display
+    let db_short: String = if db_path.len() > 38 {
+        format!("...{}", &db_path[db_path.len() - 35..])
+    } else {
+        db_path.clone()
+    };
+    let skip_short: String = top_skip.chars().take(28).collect();
+
+    eprintln!("╔════════════════════════════════════════════╗");
+    eprintln!("║         POLYMARKET BOT STATUS              ║");
+    eprintln!("╠════════════════════════════════════════════╣");
+    eprintln!("║  DB: {:<39}║", db_short);
+    eprintln!("║  Spot ticks:     {:<26}║", format_num(spot_ticks));
+    eprintln!("║  Active markets: {:<26}║", active_mkts);
+    eprintln!("║  Decisions:      {:<26}║", format_num(decisions));
+    eprintln!("║  Trade signals:  {:<26}║", trade_decisions);
+    eprintln!("║  Top skip:       {:<26}║", skip_short);
+    eprintln!("╠════════════════════════════════════════════╣");
+    eprintln!("║  Trades:         {:<26}║", trades);
+    eprintln!("║  Wins/Losses:    {:<26}║", format!("{total_wins}/{total_losses}"));
+    eprintln!("║  P&L:            {:<26}║", format!("${total_pnl:+.2}"));
+    eprintln!("║  Bankroll:       {:<26}║", format!("${bankroll:.2}"));
+    eprintln!("║  Open positions: {:<26}║", open_positions);
+    eprintln!("║  Fill rejects:   {:<26}║", rejections);
+    eprintln!("╚════════════════════════════════════════════╝");
+
+    Ok(())
+}
+
+fn format_num(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+// ─── Reset DB ────────────────────────────────────────────────────────────────
+
+fn run_reset_db(paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = &paths.db;
+    let wal = db_path.with_extension("db-wal");
+    let shm = db_path.with_extension("db-shm");
+
+    let mut removed = false;
+    for path in [db_path.as_path(), wal.as_path(), shm.as_path()] {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+            eprintln!("removed {}", path.display());
+            removed = true;
+        }
+    }
+
+    if removed {
+        eprintln!("database reset complete");
+    } else {
+        eprintln!("no database found at {}", db_path.display());
+    }
+
+    Ok(())
+}
+
+// ─── Dashboard ───────────────────────────────────────────────────────────────
+
+async fn run_dashboard(
+    paths: &AppPaths,
+    host: &str,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::header::{self, HeaderValue};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Method, Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env().add_directive("polymarket_bot=info".parse()?),
+            EnvFilter::from_default_env()
+                .add_directive("poly=info".parse()?)
+                .add_directive("polymarket_bot=info".parse()?),
         )
         .init();
 
-    // 4. Load config
-    let config = config::Config::load(&cli.config)?;
+    let db_path = paths.db_str();
+    if !paths.db.exists() {
+        return Err(format!("database not found: {db_path}. Run a trader first.").into());
+    }
 
-    // 5. Apply CLI overrides + restore bankroll from DB if available
-    let paper_trade = cli.paper_trade;
+    let preview = dashboard::load_dashboard_payload(&db_path)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    let listener = TcpListener::bind(addr).await?;
+    let db_arc = Arc::new(db_path.clone());
+
+    tracing::info!(
+        url = %format!("http://{host}:{port}"),
+        db = %db_path,
+        trades = preview.trades.len(),
+        skips = preview.skips.len(),
+        "dashboard ready"
+    );
+
+    fn response_with(
+        status: StatusCode,
+        content_type: &'static str,
+        body: Bytes,
+    ) -> Response<Full<Bytes>> {
+        let mut response = Response::new(Full::new(body));
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+        response
+    }
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (stream, _peer) = accept?;
+                let io = TokioIo::new(stream);
+                let db_ref = Arc::clone(&db_arc);
+
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let db = Arc::clone(&db_ref);
+                        async move {
+                            let resp = match (req.method(), req.uri().path()) {
+                                (&Method::GET, "/") | (&Method::GET, "/index.html") => {
+                                    response_with(
+                                        StatusCode::OK,
+                                        "text/html; charset=utf-8",
+                                        Bytes::from_static(DASHBOARD_HTML.as_bytes()),
+                                    )
+                                }
+                                (&Method::GET, "/api/bootstrap") => {
+                                    match dashboard::load_dashboard_payload(&*db) {
+                                        Ok(payload) => match serde_json::to_vec(&payload) {
+                                            Ok(body) => response_with(
+                                                StatusCode::OK,
+                                                "application/json; charset=utf-8",
+                                                Bytes::from(body),
+                                            ),
+                                            Err(e) => response_with(
+                                                StatusCode::INTERNAL_SERVER_ERROR,
+                                                "text/plain",
+                                                Bytes::from(e.to_string()),
+                                            ),
+                                        },
+                                        Err(e) => response_with(
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            "text/plain",
+                                            Bytes::from(e.to_string()),
+                                        ),
+                                    }
+                                }
+                                (&Method::GET, "/api/health") => response_with(
+                                    StatusCode::OK,
+                                    "text/plain",
+                                    Bytes::from_static(b"ok"),
+                                ),
+                                _ => response_with(
+                                    StatusCode::NOT_FOUND,
+                                    "text/plain",
+                                    Bytes::from_static(b"not found"),
+                                ),
+                            };
+                            Ok::<_, Infallible>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("dashboard shutting down");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ─── Weather (placeholder) ───────────────────────────────────────────────────
+
+async fn run_weather(
+    paths: &AppPaths,
+    _paper_trade: bool,
+    _bankroll: Option<f64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    paths.ensure_config()?;
+    paths.ensure_dirs()?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("poly=info".parse()?)
+                .add_directive("polymarket_bot=info".parse()?),
+        )
+        .init();
+
+    tracing::info!("weather trading module not yet implemented");
+    tracing::info!("coming soon: temperature prediction markets across 20 cities");
+
+    Ok(())
+}
+
+// ─── Crypto ──────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_lines)]
+async fn run_crypto(
+    paths: &AppPaths,
+    paper_trade: bool,
+    bankroll_override: Option<f64>,
+    asset_filter: cli::AssetFilter,
+    window_filter: cli::WindowFilter,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure app directory and config exist
+    paths.ensure_config()?;
+
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("poly=info".parse()?)
+                .add_directive("polymarket_bot=info".parse()?),
+        )
+        .init();
+
+    // Load config
+    let mut config = config::Config::load(&paths.config_str())?;
+    // Override db_path to use resolved path
+    config.general.db_path = paths.db_str();
+
     let mode_str = if paper_trade { "paper" } else { "real" };
 
-    // 6. Create data/ directory if needed
-    std::fs::create_dir_all("data").ok();
-
-    // 6b. Restore bankroll from last trade (if any), otherwise use config/CLI
+    // Restore bankroll from DB if available
     let startup_conn = db::init(&config.general.db_path)?;
-    let bankroll = if let Some(b) = cli.bankroll {
-        b // explicit CLI override wins
+    let bankroll = if let Some(b) = bankroll_override {
+        b
     } else if let Ok(Some(last)) = db::queries::last_bankroll(&startup_conn) {
         tracing::info!(
             bankroll = format_args!("${last:.2}"),
@@ -75,12 +423,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "loaded config"
     );
 
-    // 7. Build LiveTrader for order execution (live mode only)
+    // Build LiveTrader for live mode
     let live_trader: Option<LiveTrader> = if paper_trade {
         None
     } else {
-        let private_key = std::env::var("PRIVATE_KEY")
-            .map_err(|_| "PRIVATE_KEY env var required for real trading")?;
+        let private_key = get_private_key()
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         Some(
             LiveTrader::connect(&private_key)
@@ -89,36 +437,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    // 8. Shutdown watch channel
+    // Shutdown watch channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // 9. Create all mpsc channels
-
-    // db_tx/db_rx — all actors send to writer
+    // Create all mpsc channels
     let (db_tx, db_rx) = mpsc::channel::<DbEvent>(10_000);
-
-    // spot_tx — ingest sends here, then we fan out
     let (spot_tx, mut spot_rx_fanout) = mpsc::channel::<SpotTick>(5_000);
     let (spot_tx_signal, spot_rx_signal) = mpsc::channel::<SpotTick>(5_000);
-
-    // market channels — market_fetcher → signal and decision
     let (market_tx_signal, market_rx_signal) = mpsc::channel::<MarketState>(100);
     let (market_tx_decision, market_rx_decision) = mpsc::channel::<MarketState>(100);
-
-    // signal_tx/signal_rx — signal → decision
     let (signal_tx, signal_rx) = mpsc::channel::<Signal>(1_000);
-
-    // DecisionActor input/output
     let (decision_in_tx, decision_in_rx) = mpsc::channel::<DecisionInput>(200);
     let (decision_out_tx, mut decision_out_rx) = mpsc::channel::<DecisionOutput>(100);
-
-    // Settle channel — market_fetcher → executor
     let (settle_tx, mut settle_rx) = mpsc::channel::<SettleCommand>(100);
-
-    // Market registration channel — market_fetcher → executor
     let (market_reg_tx, mut market_reg_rx) = mpsc::channel::<MarketState>(100);
 
-    // 10. Send config snapshot to DB
+    // Send config snapshot to DB
     {
         let config_json = serde_json::to_string(&config)?;
         let _ = db_tx
@@ -129,7 +463,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     }
 
-    // 11. Spawn all actors
+    // Spawn all actors
 
     // Writer actor
     let mut writer = WriterActor::new(
@@ -149,17 +483,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ingest.run(spot_tx, ingest_db_tx, ingest_shutdown).await;
     });
 
-    // Spot price fan-out: ingest → signal
+    // Spot price fan-out
     tokio::spawn(async move {
         while let Some(sp) = spot_rx_fanout.recv().await {
             let _ = spot_tx_signal.try_send(sp);
         }
     });
 
-    // Signal actor — load warm-up state from previous session if available
+    // Signal actor
     let warm_trackers = {
         let warm_conn = db::init(&config.general.db_path)?;
-        // Accept state saved within the last 30 minutes
         let states = db::queries::load_signal_states(&warm_conn, 1800).unwrap_or_default();
         let mut trackers: HashMap<Asset, AssetTracker> = HashMap::new();
         for s in states {
@@ -178,7 +511,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.drift,
                     s.slow_drift,
                     s.lambda,
-                    s.variance, // fallback: use fast variance as slow_variance
+                    s.slow_variance,
                 ),
             );
         }
@@ -216,7 +549,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             let mut market_rx = market_rx_decision;
             while let Some(ms) = market_rx.recv().await {
-                // Also send to registration channel for executor
                 let _ = market_reg_tx.send(ms.clone()).await;
                 if tx.send(DecisionInput::Market(ms)).await.is_err() {
                     break;
@@ -224,7 +556,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    // Keep a clone for executor to send bankroll updates
     let bankroll_tx = decision_in_tx.clone();
     drop(decision_in_tx);
 
@@ -239,23 +570,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.strategy.max_volume_pct,
         config.strategy.max_bet_fraction,
         config.strategy.adapt.clone(),
+        config.strategy.midpoint_ema_tau_secs,
+        config.strategy.min_displacement_pct,
     );
     tokio::spawn(async move {
         decision_actor.run().await;
     });
 
-    // Market fetcher (replaces simulator — uses real Polymarket data)
-    // Fetcher only needs read-only access — only executor needs auth
+    // Market fetcher
     let fetcher_client =
         PolymarketClient::new(&config.polymarket.gamma_url, &config.polymarket.clob_url);
-    // Use config.markets.enabled to build window filter when CLI is --window all
-    let effective_window = match cli.window {
+    let effective_window = match window_filter {
         cli::WindowFilter::All => cli::WindowFilter::from_enabled(&config.markets.enabled),
         ref w => w.clone(),
     };
     let fetcher = MarketFetcher::new(
         fetcher_client,
-        cli.asset.clone(),
+        asset_filter.clone(),
         effective_window,
         config.polymarket.poll_interval_secs,
         config.strategy.max_spread,
@@ -275,7 +606,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    // Telegram alert actor (optional — only spawned if configured and enabled)
+    // Telegram alert actor
     let (telegram_tx, tg_stats): (
         Option<mpsc::Sender<TelegramAlert>>,
         Option<Arc<TelegramStats>>,
@@ -295,7 +626,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
             tracing::info!(
                 summary_interval_mins = tg.summary_interval_mins,
-                "telegram alerts enabled with periodic summary"
+                "telegram alerts enabled"
             );
             (Some(tg_tx), Some(stats))
         } else {
@@ -306,7 +637,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let exec_tg_stats = tg_stats.clone();
 
-    // Executor task — handles fills + settlements, returns stats
+    // Executor task
     let exec_db_tx = db_tx.clone();
     let mut exec_shutdown = shutdown_rx.clone();
     let exec_bankroll_tx = bankroll_tx;
@@ -320,7 +651,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         executor.set_next_decision_id(next_decision_id);
 
-        // Restore open positions from previous session
         for pos in &restored_positions {
             let side = match pos.side.as_str() {
                 "YES" => Side::Yes,
@@ -362,7 +692,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         loop {
             tokio::select! {
-                // Register market tokens with executor
                 msg = market_reg_rx.recv() => {
                     if let Some(ms) = msg {
                         executor.register_market(
@@ -378,9 +707,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match msg {
                         Some(DecisionOutput::Trade(dec)) => {
                             if exec_mode == Mode::Live {
-                                let res_ts = executor.market_resolution_ts(
-                                    &dec.market_id,
-                                );
+                                let res_ts = executor.market_resolution_ts(&dec.market_id);
                                 match executor.try_place_gtd(
                                     &dec,
                                     dec.best_ask,
@@ -388,36 +715,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     execution_config.gtd_expiry_secs,
                                     res_ts,
                                     execution_config.min_time_before_resolution_secs,
+                                    execution_config.gtd_price_bump,
                                 ).await {
-                                    Ok(_order_id) => {
+                                    Ok(GtdResult::InstantFill(fill)) => {
                                         trades_placed += 1;
                                         if let Some(ref stats) = exec_tg_stats {
                                             stats.record_fill();
                                         }
                                         if let Some(ref tg) = telegram_tx {
                                             let _ = tg.try_send(
-                                                TelegramAlert::GtdOrderPosted {
-                                                    market_id: dec
-                                                        .market_id
-                                                        .clone(),
-                                                    side: dec.side,
-                                                    price: dec.price,
-                                                    expiry_secs: execution_config
-                                                        .gtd_expiry_secs,
+                                                TelegramAlert::GtdOrderFilled {
+                                                    market_id: fill.market_id.clone(),
+                                                    side: fill.side,
+                                                    price: fill.fill_price,
+                                                    maker: true,
                                                 },
                                             );
                                         }
                                         let _ = exec_db_tx.try_send(
-                                            DbEvent::Decision(dec),
+                                            DbEvent::SaveOpenPosition {
+                                                decision_id: fill.decision_id,
+                                                market_id: fill.market_id.clone(),
+                                                side: fill.side,
+                                                entry_price: fill.fill_price,
+                                                size: fill.size_shares,
+                                                fee_rate: fill.fee_rate,
+                                                entry_ts: fill.entry_ts,
+                                                estimated_slippage: 0.0,
+                                            },
                                         );
+                                        let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
                                         let _ = exec_bankroll_tx.try_send(
-                                            DecisionInput::BankrollUpdate(
-                                                executor.bankroll(),
-                                            ),
+                                            DecisionInput::BankrollUpdate(executor.bankroll()),
                                         );
+                                    }
+                                    Ok(GtdResult::Resting(_order_id)) => {
+                                        if let Some(ref tg) = telegram_tx {
+                                            let _ = tg.try_send(
+                                                TelegramAlert::GtdOrderPosted {
+                                                    market_id: dec.market_id.clone(),
+                                                    side: dec.side,
+                                                    price: dec.price,
+                                                    expiry_secs: execution_config.gtd_expiry_secs,
+                                                },
+                                            );
+                                        }
+                                        let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
                                     }
                                     Err(reason) => {
                                         fill_rejections += 1;
+                                        let _ = exec_bankroll_tx.try_send(
+                                            DecisionInput::PositionClosed(dec.market_id.clone()),
+                                        );
                                         let _ = exec_db_tx.try_send(
                                             DbEvent::FillRejection {
                                                 market_id: dec.market_id.clone(),
@@ -431,10 +780,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             } else {
-                                // Paper mode: use existing try_fill path
-                                match executor.try_fill(
-                                    &dec, dec.best_ask, dec.best_bid,
-                                ).await {
+                                // Paper mode
+                                match executor.try_fill(&dec, dec.best_ask, dec.best_bid).await {
                                     Ok(fill) => {
                                         trades_placed += 1;
                                         if let Some(ref stats) = exec_tg_stats {
@@ -457,21 +804,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 size: fill.size_shares,
                                                 fee_rate: dec.fee_rate,
                                                 entry_ts: dec.ts,
-                                                estimated_slippage:
-                                                    fill.estimated_slippage,
+                                                estimated_slippage: fill.estimated_slippage,
                                             },
                                         );
-                                        let _ = exec_db_tx.try_send(
-                                            DbEvent::Decision(dec),
-                                        );
+                                        let _ = exec_db_tx.try_send(DbEvent::Decision(dec));
                                         let _ = exec_bankroll_tx.try_send(
-                                            DecisionInput::BankrollUpdate(
-                                                executor.bankroll(),
-                                            ),
+                                            DecisionInput::BankrollUpdate(executor.bankroll()),
                                         );
                                     }
                                     Err(reason) => {
                                         fill_rejections += 1;
+                                        let _ = exec_bankroll_tx.try_send(
+                                            DecisionInput::PositionClosed(dec.market_id.clone()),
+                                        );
                                         let _ = exec_db_tx.try_send(
                                             DbEvent::FillRejection {
                                                 market_id: dec.market_id.clone(),
@@ -527,11 +872,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let _ = exec_db_tx.try_send(DbEvent::Trade(tr.clone()));
                         }
-                        // Update decision actor's bankroll after settlements
                         let _ = exec_bankroll_tx.try_send(
                             DecisionInput::BankrollUpdate(executor.bankroll()),
                         );
-                        // Notify decision actor that this market's position is closed
                         let _ = exec_bankroll_tx.try_send(
                             DecisionInput::PositionClosed(cmd.market_id.clone()),
                         );
@@ -544,24 +887,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         execution_config.max_signal_age_secs,
                         execution_config.fok_price_bump,
                     ).await;
-                    for (market_id, filled) in completed {
-                        if filled {
+                    for completion in completed {
+                        if let Some(ref fill) = completion.fill {
                             trades_placed += 1;
                             if let Some(ref stats) = exec_tg_stats {
                                 stats.record_fill();
                             }
+                            if let Some(ref tg) = telegram_tx {
+                                let _ = tg.try_send(
+                                    TelegramAlert::GtdOrderFilled {
+                                        market_id: fill.market_id.clone(),
+                                        side: fill.side,
+                                        price: fill.fill_price,
+                                        maker: completion.maker,
+                                    },
+                                );
+                            }
+                            let _ = exec_db_tx.try_send(
+                                DbEvent::SaveOpenPosition {
+                                    decision_id: fill.decision_id,
+                                    market_id: fill.market_id.clone(),
+                                    side: fill.side,
+                                    entry_price: fill.fill_price,
+                                    size: fill.size_shares,
+                                    fee_rate: fill.fee_rate,
+                                    entry_ts: fill.entry_ts,
+                                    estimated_slippage: 0.0,
+                                },
+                            );
                             let _ = exec_bankroll_tx.try_send(
-                                DecisionInput::BankrollUpdate(
-                                    executor.bankroll(),
-                                ),
+                                DecisionInput::BankrollUpdate(executor.bankroll()),
                             );
                         } else {
                             fill_rejections += 1;
-                            // Order failed — free the market for new decisions
                             let _ = exec_bankroll_tx.try_send(
-                                DecisionInput::PositionClosed(
-                                    market_id,
-                                ),
+                                DecisionInput::PositionClosed(completion.market_id),
                             );
                         }
                     }
@@ -569,7 +929,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 _ = exec_shutdown.changed() => {
                     executor.cancel_all_active_orders().await;
-                    // Drain remaining settle commands
                     while let Ok(cmd) = settle_rx.try_recv() {
                         markets_resolved += 1;
                         let _ = exec_db_tx.try_send(DbEvent::ClearOpenPositions {
@@ -591,7 +950,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Return stats for main to print after all actors finish
         (
             executor.bankroll(),
             trades_placed,
@@ -605,30 +963,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    // 12. Log startup info
+    // Log startup info
     tracing::info!(
-        "polymarket-bot v{} — {mode_str} mode — ${bankroll:.2} bankroll",
+        "poly v{} — {mode_str} mode — ${bankroll:.2} bankroll",
         env!("CARGO_PKG_VERSION"),
     );
-    tracing::info!("asset={:?} window={:?}", cli.asset, cli.window,);
+    tracing::info!("asset={:?} window={:?}", asset_filter, window_filter);
     if paper_trade {
         tracing::info!("paper-trade mode: real market data, simulated execution");
-        tracing::info!("no API keys required — using public Polymarket endpoints");
     } else {
         tracing::info!("REAL trading mode: orders will be placed on Polymarket");
     }
-    tracing::info!("press Ctrl+C to stop and see the summary");
+    tracing::info!("press Ctrl+C to stop");
 
-    // 13. Wait for ctrl+c
+    // Wait for ctrl+c
     tokio::signal::ctrl_c().await?;
-
-    // 14. Send shutdown signal
     tracing::info!("shutting down...");
     let _ = shutdown_tx.send(true);
 
-    // 15. Wait for executor to finish, then drain DB writes
-    // Drop our db_tx so once all actors exit and drop their clones,
-    // the writer's channel closes and it flushes remaining events.
     drop(db_tx);
 
     if let Ok((
@@ -668,8 +1020,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("══════════════════════════════════════════");
     }
 
-    // Wait for writer to flush all remaining events
     let _ = writer_handle.await;
-    tracing::info!("shutdown complete — query data/bot.db for detailed dashboard data");
+    tracing::info!("shutdown complete");
     Ok(())
 }

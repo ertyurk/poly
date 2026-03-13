@@ -21,6 +21,11 @@ const MIN_VOL: f64 = 0.00005;
 /// Minimum valid updates before emitting signals (~30 seconds of data).
 const MIN_TICKS: u32 = 30;
 
+/// Cold-start warmup: suppress signals for this many seconds after the first
+/// tick. Prevents trading with unreliable drift estimates (fast drift half-life
+/// is ~5 min, so 5 min warmup gives at least one full half-life of data).
+const WARMUP_SECS: i64 = 300;
+
 /// Safety margin on realized volatility.
 /// Set to 1.0 because tail risk is now handled by the Student-t CDF
 /// (fat_tail_cdf) instead of crude vol inflation. The old value of 1.3
@@ -125,6 +130,8 @@ fn compute_p_hat_lognormal(
 pub struct AssetTracker {
     last_price: f64,
     last_ts: TsMicros,
+    /// Timestamp of the first tick — used for cold-start warmup.
+    first_ts: TsMicros,
     /// Count of valid updates (spaced ≥ 0.1s apart) — NOT raw ticks.
     valid_ticks: u32,
     /// Exponentially-weighted per-second variance estimate.
@@ -141,11 +148,12 @@ pub struct AssetTracker {
 }
 
 impl AssetTracker {
-    fn new(lambda: f64) -> Self {
+    pub fn new(lambda: f64) -> Self {
         let slow_lambda = lambda / SLOW_DRIFT_FACTOR;
         Self {
             last_price: 0.0,
             last_ts: 0,
+            first_ts: 0,
             valid_ticks: 0,
             variance: INITIAL_VOL * INITIAL_VOL,
             slow_variance: INITIAL_VOL * INITIAL_VOL,
@@ -157,10 +165,13 @@ impl AssetTracker {
     }
 
     /// Update with a new price tick. Returns true if enough data for signals.
-    fn update(&mut self, price: f64, ts: TsMicros) -> bool {
+    /// Requires both MIN_TICKS valid updates AND WARMUP_SECS elapsed since
+    /// first tick to prevent trading with unreliable drift estimates.
+    pub fn update(&mut self, price: f64, ts: TsMicros) -> bool {
         if self.valid_ticks == 0 {
             self.last_price = price;
             self.last_ts = ts;
+            self.first_ts = ts;
             self.valid_ticks = 1;
             return false;
         }
@@ -179,15 +190,12 @@ impl AssetTracker {
             self.drift = (1.0 - alpha) * self.drift + alpha * ret_per_sec;
 
             // Slow EWM update (captures prevailing trend)
-            let slow_alpha =
-                (1.0 - (-self.slow_lambda * dt_secs).exp()).clamp(0.001, 0.5);
-            self.slow_drift =
-                (1.0 - slow_alpha) * self.slow_drift + slow_alpha * ret_per_sec;
+            let slow_alpha = (1.0 - (-self.slow_lambda * dt_secs).exp()).clamp(0.001, 0.5);
+            self.slow_drift = (1.0 - slow_alpha) * self.slow_drift + slow_alpha * ret_per_sec;
 
             // Slow variance EWM (~30 min half-life)
             let slow_vol_lambda = self.lambda / SLOW_VOL_FACTOR;
-            let slow_vol_alpha =
-                (1.0 - (-slow_vol_lambda * dt_secs).exp()).clamp(0.001, 0.5);
+            let slow_vol_alpha = (1.0 - (-slow_vol_lambda * dt_secs).exp()).clamp(0.001, 0.5);
             self.slow_variance =
                 (1.0 - slow_vol_alpha) * self.slow_variance + slow_vol_alpha * var_sample;
 
@@ -196,7 +204,9 @@ impl AssetTracker {
             self.valid_ticks += 1;
         }
 
-        self.valid_ticks >= MIN_TICKS
+        let warmup_elapsed =
+            (ts - self.first_ts) >= WARMUP_SECS * 1_000_000;
+        self.valid_ticks >= MIN_TICKS && warmup_elapsed
     }
 
     fn vol_per_sec(&self) -> f64 {
@@ -225,9 +235,9 @@ impl AssetTracker {
         self.last_price
     }
 
-    /// Restore state from a previous session to avoid cold-start warm-up.
-    /// Drift is reset to zero — it's directional and goes stale between sessions.
-    /// Vol and tick count are structural and worth preserving.
+    /// Restore vol/tick state from a previous session.
+    /// Drift is reset to zero and warmup re-applies from the restore timestamp,
+    /// since stale drift needs time to rebuild from live ticks.
     pub fn restore(
         last_price: f64,
         last_ts: TsMicros,
@@ -242,6 +252,9 @@ impl AssetTracker {
         Self {
             last_price,
             last_ts,
+            // Restored trackers still need warmup — drift is zeroed on
+            // restore and needs time to rebuild from live ticks.
+            first_ts: last_ts,
             valid_ticks,
             variance,
             slow_variance,

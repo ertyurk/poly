@@ -76,11 +76,7 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
 }
 
 /// Check if a column exists in a table using PRAGMA table_info.
-fn column_exists(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-) -> Result<bool, rusqlite::Error> {
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let found = stmt
         .query_map([], |row| row.get::<_, String>(1))?

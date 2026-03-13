@@ -41,4 +41,3 @@ fn test_position_size() {
     let size = polymarket_bot::math::kelly::position_size(0.60, 0.50, 0.5, 100_000.0);
     assert_relative_eq!(size, 10_000.0, epsilon = 1.0);
 }
-

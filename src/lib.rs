@@ -7,5 +7,6 @@ pub mod dashboard;
 pub mod db;
 pub mod flow;
 pub mod math;
+pub mod paths;
 pub mod polymarket;
 pub mod types;

@@ -97,7 +97,11 @@ impl FlowTracker {
         }
 
         // Write to ring buffer
-        let record = TickRecord { ts, qty, signed_qty: signed };
+        let record = TickRecord {
+            ts,
+            qty,
+            signed_qty: signed,
+        };
         if self.buf.len() < Self::CAPACITY {
             self.buf.push(record);
             self.write_pos = self.buf.len();

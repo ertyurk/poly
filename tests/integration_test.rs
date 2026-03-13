@@ -10,9 +10,7 @@ async fn test_full_pipeline_paper_trade() {
 
     let p_market = 0.50;
     let result = decide(
-        p_hat,
-        p_market,
-        0.05,      // tau_min
+        p_hat, p_market, 0.05,      // tau_min
         100_000.0, // b (LMSR liquidity)
         0.5,       // kelly_fraction
         100_000.0, // bankroll
@@ -20,9 +18,7 @@ async fn test_full_pipeline_paper_trade() {
         0.02,      // max_volume_pct
         0.10,      // max_bet_fraction
         0.10,      // min_confidence
-        confidence,
-        "test-mkt",
-        0.48, // best_bid
+        confidence, "test-mkt", 0.48, // best_bid
         0.52, // best_ask
         "",   // event_slug
         0.95, // max_fill_price

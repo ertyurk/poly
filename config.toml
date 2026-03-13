@@ -21,7 +21,7 @@ initial = 100.0
 # A higher value means fewer but higher-conviction trades.
 # edge must exceed tau_min + effective_spread to pass the entry gate.
 # Set low (0.02) for paper trading to see more activity; increase for live.
-tau_min = 0.05
+tau_min = 0.03
 
 # Fraction of full Kelly criterion to use for position sizing.
 # 0.25 = quarter-Kelly (conservative, lower variance).
@@ -56,10 +56,20 @@ max_bet_fraction = 0.10
 # Prevents over-commitment when many markets are discovered at once.
 max_total_exposure = 0.50
 
+# Minimum spot displacement from market open price (%) to consider trading.
+# Filters out noise. 0.15 = 0.15% (~$120 on $80K BTC).
+# Higher = fewer trades but higher conviction. Lower = more trades but noisier.
+min_displacement_pct = 0.15
+
 # Maximum bid-ask spread (in price units) to accept when discovering markets.
 # Markets wider than this are skipped as illiquid. Tighter = better fills.
 # 0.03 = 3¢ (tight, fewer markets), 0.05 = 5¢ (moderate), 0.10 = 10¢ (loose)
 max_spread = 0.03
+
+# EMA smoothing time constant (seconds) for market agreement midpoint filter.
+# Prevents brief order-book flash crashes from bypassing the filter.
+# Half-life ≈ tau × ln(2). 45s → half-life ≈ 31s.
+midpoint_ema_tau_secs = 45.0
 
 [strategy.adapt]
 # ADAPT composite score weights (must sum to 1.0)
@@ -142,8 +152,9 @@ enabled = true
 summary_interval_mins = 15
 
 [execution]
-gtd_expiry_secs = 15
+gtd_expiry_secs = 7
 max_signal_age_secs = 20
-fok_price_bump = 0.01
+fok_price_bump = 0.03
+gtd_price_bump = 0.01
 min_time_before_resolution_secs = 60
-order_poll_interval_secs = 3
+order_poll_interval_secs = 1

@@ -153,7 +153,9 @@ impl LiveTrader {
             Decimal::from_str(&format!("{price:.2}")).map_err(|e| format!("invalid price: {e}"))?;
         let size_dec =
             Decimal::from_str(&format!("{size:.2}")).map_err(|e| format!("invalid size: {e}"))?;
-        let expiry = Utc::now() + Duration::seconds(expiry_secs as i64);
+        // Polymarket requires expiration >= now + 60s (security threshold).
+        // Add 60s buffer so a 15s GTD actually expires at now + 75s.
+        let expiry = Utc::now() + Duration::seconds(60 + expiry_secs as i64);
 
         let order = self
             .client

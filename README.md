@@ -1,297 +1,205 @@
-# polymarket-bot
+# poly
 
-Trading bot for [Polymarket](https://polymarket.com) crypto prediction markets. Connects to Binance for real-time spot prices and Polymarket for real market data, order books, and trade execution. Uses a log-normal probability model, LMSR pricing, and Kelly-criterion position sizing.
+Trading bot for [Polymarket](https://polymarket.com) prediction markets. Supports crypto (BTC/ETH up/down) and weather (temperature) markets.
 
-Supports **paper trading** (real data, simulated execution) and **live trading** (real orders via Polymarket CLOB API with EIP-712 signing).
+Uses a log-normal probability model, LMSR pricing, and Kelly-criterion position sizing. Supports **paper trading** (simulated execution) and **live trading** (real orders via Polymarket CLOB API).
 
-## Usage
-
-```bash
-cargo run -- [OPTIONS]
-
-Options:
-    --asset <btc|eth|all>       Asset filter [default: all]
-    --window <5m|15m|all>       Window filter [default: all]
-    --bankroll <USD>            Starting bankroll (overrides config.toml)
-    --paper-trade / --dry-run   Paper mode: real data, simulated execution
-    --config <PATH>             Config file [default: config.toml]
-```
-
-### Examples
+## Install
 
 ```bash
-# Paper trade BTC 5-minute markets with $100
-cargo run -- --paper-trade --asset btc --window 5m --bankroll 100
+# Install globally as `poly`
+cargo install --path .
 
-# Paper trade all crypto markets with $500
-cargo run -- --paper-trade --bankroll 500
-
-# Paper trade ETH only, all windows
-cargo run -- --paper-trade --asset eth
-
-# Live trading (requires API keys in .env)
-cargo run -- --asset btc --bankroll 1000
-
-# Live trading with debug logging
-RUST_LOG=polymarket_bot=debug cargo run -- --bankroll 5000
+# Or with private key baked into the binary (no .env needed)
+PRIVATE_KEY=your_hex_key cargo install --path .
 ```
-
-### Paper trade vs live trade
-
-Both modes use **identical data pipelines** — the only difference is order execution:
-
-| Component | Paper mode | Live mode |
-|---|---|---|
-| Polymarket market discovery (Gamma API) | Real | Real |
-| Order books (CLOB API, refreshed every 5s) | Real | Real |
-| Binance spot prices (WebSocket) | Real | Real |
-| Log-normal signal model | Real | Real |
-| Decision engine (edge, fees, sizing) | Real | Real |
-| Market resolution detection | Real | Real |
-| Position & bankroll persistence | Real | Real |
-| Telegram notifications | Real | Real |
-| **Order execution** | **Simulated (with slippage)** | **CLOB API `POST /order`** |
-| API keys required | No | Yes |
-
-Paper mode gives you accurate P&L tracking against real market conditions without risking capital.
 
 ## Quick start
 
-### Prerequisites
-
-- Rust 1.75+ (edition 2021)
-- Internet connection (Binance WebSocket + Polymarket API)
-
-### Build and run
-
 ```bash
-# Build
-cargo build
+# Paper trade crypto with $100 bankroll
+poly crypto --paper --bankroll 100
 
-# Build optimized release (full LTO enabled)
-cargo build --release
+# Live trade crypto (requires PRIVATE_KEY)
+poly crypto --bankroll 54
 
-# Run in paper-trade mode (no API keys needed)
-cargo run -- --paper-trade --bankroll 100
+# Paper trade BTC 5-minute markets only
+poly crypto --paper --bankroll 100 --asset btc --window 5m
 
-# Run tests
-cargo test
+# Paper trade weather markets
+poly weather --paper --bankroll 50
+
+# Check bot status
+poly status
+
+# Launch dashboard in another terminal
+poly dashboard
+
+# Reset database for clean state
+poly reset-db
 ```
 
-### Environment variables
+## Commands
 
-The bot loads `.env` from the current directory automatically via `dotenvy`. Paper mode needs no env vars. Live mode requires:
+```
+poly <COMMAND> [OPTIONS]
 
-```bash
-# .env (in project root)
-PRIVATE_KEY=your_ethereum_private_key_hex
+Commands:
+  crypto      Run crypto prediction market trader
+  weather     Run weather prediction market trader
+  dashboard   Launch web dashboard (separate terminal)
+  status      Show quick database status report
+  reset-db    Remove database for clean state
+
+Global options:
+  --config <PATH>     Config file [default: ~/.polymarket/config.toml]
+  --db-path <PATH>    Database file [default: ~/.polymarket/data.db]
 ```
 
-The official Polymarket SDK derives API credentials from the private key automatically. See `.env.example` for a template.
+### `poly crypto`
 
-### Live trading setup
+```
+poly crypto [OPTIONS]
 
-See [`docs/live-trading-setup.md`](docs/live-trading-setup.md) for the full step-by-step guide (wallet private key export, Telegram setup).
+Options:
+  --paper-trade, --paper    Simulated execution (no API keys needed)
+  --bankroll <USD>          Starting bankroll (overrides config)
+  --asset <btc|eth|all>     Asset filter [default: all]
+  --window <5m|15m|all>     Window filter [default: all]
+```
 
-Quick version:
-1. Copy `.env.example` to `.env`
-2. Fill in your private key
-3. Run without `--paper-trade`:
-   ```bash
-   cargo run -- --asset btc --bankroll 1000
-   ```
+### `poly weather`
+
+```
+poly weather [OPTIONS]
+
+Options:
+  --paper-trade, --paper    Simulated execution
+  --bankroll <USD>          Starting bankroll
+```
+
+### `poly dashboard`
+
+```
+poly dashboard [OPTIONS]
+
+Options:
+  --host <HOST>    Bind address [default: 127.0.0.1]
+  --port <PORT>    Port [default: 3030]
+```
+
+Open `http://127.0.0.1:3030` in your browser. Reads from the same DB the trader writes to.
+
+### `poly status`
+
+Quick terminal report — decisions, trades, P&L, open positions, skip reasons.
+
+### `poly reset-db`
+
+Removes `data.db`, `data.db-wal`, `data.db-shm` for a clean start.
+
+## Data directory
+
+Everything lives in `~/.polymarket/`:
+
+```
+~/.polymarket/
+├── config.toml    # auto-created on first run with defaults
+├── data.db        # SQLite database
+└── .env           # private key (optional, runtime fallback)
+```
+
+Override with `--config` or `--db-path` flags.
+
+## Private key
+
+Three-tier fallback for the Polymarket signing key:
+
+1. **Compile-time** — `PRIVATE_KEY=xxx cargo install --path .` (baked into binary)
+2. **`.env` file** — `~/.polymarket/.env` or project-local `.env`
+3. **Environment variable** — `PRIVATE_KEY=xxx poly crypto`
+
+Paper mode needs no key.
+
+## Paper vs live
+
+Both modes use identical data pipelines — only order execution differs:
+
+| Component | Paper | Live |
+|---|---|---|
+| Polymarket market discovery | Real | Real |
+| Order books (CLOB API) | Real | Real |
+| Binance spot prices (WebSocket) | Real | Real |
+| Signal model + decision engine | Real | Real |
+| **Order execution** | **Simulated** | **CLOB API** |
+| API key required | No | Yes |
 
 ## How it works
 
-See [`docs/architecture.md`](docs/architecture.md) for the full system design, signal model math, decision pipeline, and data flow.
-
 ```
-Binance WS ──► Ingest ──► Signal Engine ──► Decision Engine ──► Executor
-  (spot prices)            (log-normal)       (edge/sizing)     (paper or live)
-                                                                      │
-Polymarket ──► Market Fetcher ──► Signal + Decision                   │
-  (Gamma API)   (real markets,      (real prices,                     ▼
-  (CLOB API)     order books)        real fees)              ┌──► Telegram
-                                                             │   (alerts + summaries)
-                                                             ▼
-                                                        SQLite Writer
-                                                      (batched, WAL mode)
+Binance WS ──► Ingest ──► Signal ──► Decision ──► Executor
+                            │           │             │
+Polymarket ──► Fetcher ─────┘           │             ├──► Telegram
+  (Gamma API)                           │             │
+  (CLOB API)                            │             ▼
+                                        │        SQLite Writer
+                                        │
+                              Open-Meteo ──► Weather Signal (coming soon)
 ```
 
-**Seven actors** run as async tokio tasks, connected by `mpsc` channels:
+Seven async actors connected by `mpsc` channels:
 
 | Actor | Role |
 |---|---|
-| **Ingest** | Binance WebSocket for real-time BTC/ETH trades. Reconnects with exponential backoff. |
-| **Market Fetcher** | Polls Polymarket Gamma API for crypto prediction markets. Fetches real order books from CLOB API every 5s. Detects market resolution. Parses market type (Above/Below/Between/UpDown) from question text. |
-| **Signal** | Per-asset `AssetTracker` estimates realized volatility and drift from Binance ticks (EWM with dual-timescale drift). Computes `p_hat = P(S_T > K)` via log-normal CDF per `MarketType`. Requires 30+ ticks warm-up. |
-| **Decision** | Edge gating: edge must exceed fees. Sizes with quarter-Kelly. Per-trade cap 10% of bankroll, total exposure cap 50%. |
-| **Executor** | Paper mode: simulates fills with slippage model. Live mode: places EIP-712 signed orders. Positions persist across restarts. |
-| **Writer** | Batched SQLite writer. Flushes every 100 events or 500ms. Fire-and-forget channel. |
-| **Telegram** | Trade fill + settlement alerts. Periodic and shutdown summaries. Rate-limited (1 msg/sec). |
-
-## Key math
-
-| Concept | Formula | Source |
-|---|---|---|
-| Log-normal CDF | `p_hat = Φ((ln(S/K) + μT) / (σ√T))` | Black-Scholes-style |
-| EWM variance | `σ² += λ(r² - σ²)` with dual-timescale drift (fast ~5min, slow ~20min) | Exponential moving avg |
-| LMSR cost | `C(q) = b * ln(Σ e^(q_i/b))` | Hanson 2003 |
-| Quarter-Kelly | `f = kelly_fraction * (p_hat - p) / (1 - p)` | Kelly criterion / 4 |
-| Entry gate | `effective_edge = \|p_hat - market_price\| - fee_rate` | Edge must clear fees |
-| Stealth cap | `size ≤ 0.02 * volume_24h` | Avoid moving the market |
-| Paper slippage | `slippage = spread/2 + size/(size + $50k) * 0.02` | Linear impact model |
+| **Ingest** | Binance WebSocket for real-time spot ticks |
+| **Market Fetcher** | Polymarket market discovery + order books |
+| **Signal** | Log-normal CDF probability model |
+| **Decision** | Edge gating + quarter-Kelly sizing |
+| **Executor** | Paper fills or live CLOB orders (GTD→FOK lifecycle) |
+| **Writer** | Batched SQLite (100 events / 500ms) |
+| **Telegram** | Trade alerts + periodic summaries |
 
 ## Configuration
 
-All settings in [`config.toml`](config.toml) with inline documentation. Key sections:
+Config lives at `~/.polymarket/config.toml` (auto-created on first run).
 
-| Section | Controls |
-|---|---|
-| `[bankroll]` | Starting bankroll (USD) |
-| `[strategy]` | Edge threshold, Kelly fraction, volume cap, confidence floor, LMSR liquidity, max exposure |
-| `[binance]` | WebSocket URL and trade streams |
-| `[polymarket]` | CLOB, Gamma API endpoints; polling intervals |
-| `[writer]` | SQLite batch size and flush interval |
-| `[telegram]` | Bot token, chat ID, summary interval (optional) |
+Key settings:
+
+| Setting | Default | Description |
+|---|---|---|
+| `strategy.tau_min` | 0.03 | Minimum edge threshold |
+| `strategy.kelly_fraction` | 0.25 | Quarter-Kelly sizing |
+| `strategy.max_bet_fraction` | 0.10 | Max 10% bankroll per trade |
+| `strategy.max_total_exposure` | 0.50 | Max 50% total exposure |
+| `execution.gtd_expiry_secs` | 7 | GTD order timeout |
+| `execution.fok_price_bump` | 0.03 | FOK fallback price bump |
+| `telegram.enabled` | true | Enable/disable alerts |
+
+See `config.toml` for all options with inline docs.
 
 ## Database
 
-SQLite with WAL mode, `synchronous = NORMAL`, foreign keys enabled. Idempotent schema migrations on startup. Ten tables:
+SQLite with WAL mode. Ten tables tracking spot prices, markets, signals, decisions, trades, and positions.
 
-| Table | Contents |
-|---|---|
-| `spot_prices` | Every Binance trade tick |
-| `markets` | Discovered Polymarket markets (with resolution tracking) |
-| `book_snapshots` | Order book snapshots (bid, ask, midpoint, spread) |
-| `signals` | Signal output (p_hat, confidence, prior, n_observations) |
-| `decisions` | Every trade/skip with edge, fees, sizing |
-| `trades` | Executed trades with P&L, bankroll state, estimated slippage |
-| `config_snapshots` | Config JSON at startup |
-| `open_positions` | Persisted open positions (survive restarts) |
-| `signal_state` | Warm-up state for `AssetTracker` (vol, drift, slow_drift) |
+```bash
+# Quick P&L check
+poly status
+
+# Manual query
+sqlite3 ~/.polymarket/data.db \
+  "SELECT count(*) as trades, sum(pnl) as pnl FROM trades"
+```
 
 ### Restart resilience
 
-On startup, the bot:
-1. Restores bankroll from the last trade's `bankroll_after` (or config default)
-2. Loads open positions from `open_positions` table into executor
-3. Restores signal warm-up state (`AssetTracker` variance/drift) if saved within the last hour
-4. Resumes `next_decision_id` from `MAX(id)` in decisions table
-
-Position writes and signal state saves are **fire-and-forget** via the writer channel — no blocking on the hot path.
-
-Query results anytime:
-
-```bash
-sqlite3 data/bot.db "SELECT COUNT(*) as trades, \
-  SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins, \
-  printf('\$%.2f', SUM(pnl)) as pnl, \
-  printf('\$%.2f', (SELECT bankroll_after FROM trades ORDER BY resolved_ts DESC LIMIT 1)) as bankroll \
-  FROM trades;"
-```
-
-See [`docs/dashboard-queries.md`](docs/dashboard-queries.md) for ready-to-use SQL queries.
-
-## Local profitability dashboard
-
-For fast local what-if analysis, run the built-in dashboard server:
-
-```bash
-cargo run --bin dashboard -- --db data/bot.db --port 3030
-```
-
-Then open `http://127.0.0.1:3030` in your browser.
-
-The dashboard is fully local and zero-build:
-- Rust server reads SQLite and serves JSON + HTML
-- Vanilla JS frontend auto-refreshes from the DB for live monitoring
-- Top cards show realized bankroll, estimated total equity, fees, and open exposure
-- Tables and charts show open positions, spot streams, settled trades, and fill rejections
-
-See `docs/local-dashboard.md` for the architecture and extension plan.
-
-## Just commands
-
-Use `just` to keep trader and dashboard commands separate:
-
-```bash
-just run-trader
-just run-trader-paper --asset btc --window 5m --bankroll 100
-just run-dashboard
-just run-dashboard-paper
-```
-
-`just run-trader` is the generic trader entrypoint. If you want the safe default, use `just run-trader-paper`.
-
-Run `just --list` to see the full command set.
-
-## Project structure
-
-```
-polymarket-bot/
-├── Cargo.toml
-├── config.toml
-├── rustfmt.toml
-├── schema.sql
-├── .env.example
-├── src/
-│   ├── main.rs               # CLI parsing, actor wiring, startup + restore
-│   ├── cli.rs                 # clap CLI definition
-│   ├── config.rs              # TOML config parsing
-│   ├── types.rs               # Domain types and channel messages
-│   ├── actors/
-│   │   ├── ingest.rs          # Binance WebSocket consumer
-│   │   ├── market_fetcher.rs  # Polymarket market discovery + order books
-│   │   ├── signal.rs          # Log-normal signal engine (AssetTracker)
-│   │   ├── decision.rs        # Edge gating and position sizing
-│   │   ├── executor.rs        # Paper/live trade execution + position persistence
-│   │   ├── telegram.rs        # Telegram alerts + periodic summaries
-│   │   └── writer.rs          # Batched SQLite writer
-│   ├── polymarket/
-│   │   ├── client.rs          # Gamma + CLOB API HTTP client
-│   │   ├── auth.rs            # HMAC-SHA256 API authentication
-│   │   ├── signing.rs         # EIP-712 order signing (Polygon)
-│   │   └── types.rs           # API request/response types
-│   ├── math/
-│   │   ├── lmsr.rs            # LMSR pricing
-│   │   └── kelly.rs           # Kelly criterion sizing
-│   └── db/
-│       ├── mod.rs             # SQLite init (WAL, foreign keys)
-│       ├── schema.rs          # Table creation + migrations
-│       └── queries.rs         # Insert/update/restore helpers
-└── docs/
-    ├── architecture.md
-    ├── live-trading-setup.md
-    └── dashboard-queries.md
-```
-
-## Telegram notifications
-
-Optional. Add to `config.toml`:
-
-```toml
-[telegram]
-bot_token = "123456:ABC-DEF..."   # from @BotFather
-chat_id = "your_chat_id"          # from @userinfobot
-summary_interval_mins = 60
-```
-
-You'll receive:
-- **Trade Filled** — on every position entry (market, side, size, price, edge%)
-- **Trade Settled** — on market resolution (outcome, P&L, fees, bankroll)
-- **Periodic Summary** — every N minutes (win/loss/rate, total P&L, bankroll)
-- **Final Session Summary** — on graceful shutdown (Ctrl+C)
+On startup, the bot restores: bankroll, open positions, signal warm-up state, and decision ID sequence.
 
 ## Code quality
 
 - `#![forbid(unsafe_code)]`
-- Strict clippy: pedantic + nursery warnings, `unwrap`/`expect`/`panic` denied
-- Release: `opt-level = 3`, full LTO, `codegen-units = 1`, symbols stripped
-- Zero warnings, `rustfmt` enforced (`max_width = 100`)
-- Hot-path functions `#[inline]`
-- `VecDeque` for O(1) observation window management
-- `Copy` types on hot-path messages
+- Strict clippy: pedantic + nursery, `unwrap`/`expect`/`panic` denied
+- Release: LTO, `codegen-units = 1`, symbols stripped
+- All tests: `cargo test`
 
 ## License
 

@@ -626,7 +626,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn dashboard_payload_loads_trade_data() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn dashboard_payload_loads_trade_data() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
         let tmp = NamedTempFile::new()?;
         let path = tmp.path().to_string_lossy().to_string();
         let conn = db::init(&path)?;

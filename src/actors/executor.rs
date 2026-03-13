@@ -13,6 +13,39 @@ pub struct FillResult {
     pub estimated_slippage: f64,
 }
 
+/// Details of a live fill (GTD instant, GTD deferred, or FOK fallback).
+/// Returned to main.rs so it can emit SaveOpenPosition DB events.
+#[derive(Debug, Clone)]
+pub struct LiveFill {
+    pub decision_id: i64,
+    pub market_id: String,
+    pub side: Side,
+    pub fill_price: f64,
+    pub size_shares: f64,
+    pub fee_rate: f64,
+    pub entry_ts: TsMicros,
+    pub event_slug: String,
+}
+
+/// Result of placing a GTD order.
+#[derive(Debug)]
+pub enum GtdResult {
+    /// Order was instantly matched — position created, needs DB persistence.
+    InstantFill(LiveFill),
+    /// Order is resting on the book — poll for status.
+    Resting(String),
+}
+
+/// Result of polling an active order that completed.
+#[derive(Debug)]
+pub struct PollCompletion {
+    pub market_id: String,
+    /// Some if filled (GTD deferred or FOK fallback), None if unfilled.
+    pub fill: Option<LiveFill>,
+    /// True if filled via maker (GTD), false if filled via taker (FOK).
+    pub maker: bool,
+}
+
 /// Estimate slippage for paper trading based on order size and spread.
 ///
 /// Model: slippage = half_spread + size_impact
@@ -193,6 +226,11 @@ impl Executor {
         best_ask: f64,
         best_bid: f64,
     ) -> Result<FillResult, String> {
+        // Guard: try_fill is for Paper mode only. Live mode must use try_place_gtd.
+        if self.mode == Mode::Live {
+            return Err("use_gtd_for_live".to_string());
+        }
+
         // Only one position per market
         if self.positions.iter().any(|p| p.market_id == dec.market_id) {
             return Err("duplicate_position".to_string());
@@ -433,7 +471,8 @@ impl Executor {
         gtd_expiry_secs: u64,
         resolution_ts: TsMicros,
         min_time_before_resolution_secs: u64,
-    ) -> Result<String, String> {
+        gtd_price_bump: f64,
+    ) -> Result<GtdResult, String> {
         // No duplicate positions per market
         if self.positions.iter().any(|p| p.market_id == dec.market_id) {
             return Err("duplicate_position".to_string());
@@ -490,10 +529,12 @@ impl Executor {
         }
 
         // Compute fill price: YES uses best_ask, NO uses complement of best_bid
+        // Apply gtd_price_bump to cross the spread slightly for faster fills.
         let fill_price = match dec.side {
-            Side::Yes => best_ask,
-            Side::No => ((1.0 - best_bid) * 100.0).round() / 100.0,
-        };
+            Side::Yes => ((best_ask + gtd_price_bump) * 100.0).round() / 100.0,
+            Side::No => (((1.0 - best_bid) + gtd_price_bump) * 100.0).round() / 100.0,
+        }
+        .min(0.95);
 
         // Slippage check
         if dec.price > 0.0 && (fill_price - dec.price).abs() / dec.price > MAX_SLIPPAGE {
@@ -549,7 +590,16 @@ impl Executor {
                         estimated_slippage: 0.0,
                         event_slug: dec.event_slug.clone(),
                     });
-                    Ok(result.order_id)
+                    Ok(GtdResult::InstantFill(LiveFill {
+                        decision_id: id,
+                        market_id: dec.market_id.clone(),
+                        side: dec.side,
+                        fill_price,
+                        size_shares: order_shares,
+                        fee_rate: 0.0,
+                        entry_ts: dec.ts,
+                        event_slug: dec.event_slug.clone(),
+                    }))
                 } else if result.success {
                     // Resting on book — track for polling
                     tracing::info!(
@@ -575,7 +625,7 @@ impl Executor {
                             decision: dec.clone(),
                         },
                     );
-                    Ok(result.order_id)
+                    Ok(GtdResult::Resting(result.order_id))
                 } else {
                     self.failed_cooldown
                         .insert(dec.market_id.clone(), crate::types::now_micros());
@@ -602,7 +652,7 @@ impl Executor {
         gtd_expiry_secs: u64,
         max_signal_age_secs: u64,
         fok_price_bump: f64,
-    ) -> Vec<(String, bool)> {
+    ) -> Vec<PollCompletion> {
         let now = crate::types::now_micros();
         let expiry_micros = gtd_expiry_secs as i64 * 1_000_000;
         let max_age_micros = max_signal_age_secs as i64 * 1_000_000;
@@ -661,7 +711,7 @@ impl Executor {
                             "{:.2}", order.size_shares
                         ),
                         price = order.price,
-                        "GTD order filled"
+                        "GTD order filled (maker)"
                     );
                     self.positions.push(OpenPosition {
                         decision_id: id,
@@ -674,7 +724,20 @@ impl Executor {
                         estimated_slippage: 0.0,
                         event_slug: order.event_slug.clone(),
                     });
-                    completed.push((order.market_id.clone(), true));
+                    completed.push(PollCompletion {
+                        market_id: order.market_id.clone(),
+                        fill: Some(LiveFill {
+                            decision_id: id,
+                            market_id: order.market_id.clone(),
+                            side: order.side,
+                            fill_price: order.price,
+                            size_shares: order.size_shares,
+                            fee_rate: 0.0,
+                            entry_ts: order.signal_ts,
+                            event_slug: order.event_slug.clone(),
+                        }),
+                        maker: true,
+                    });
                 }
                 PollAction::Expired | PollAction::Cancelled => {
                     let label = match action {
@@ -687,10 +750,14 @@ impl Executor {
                         reason = label,
                         "GTD order done, trying FOK fallback"
                     );
-                    let filled = self
+                    let fill = self
                         .try_fok_fallback(order, now, max_age_micros, fok_price_bump)
                         .await;
-                    completed.push((order.market_id.clone(), filled));
+                    completed.push(PollCompletion {
+                        market_id: order.market_id.clone(),
+                        fill,
+                        maker: false,
+                    });
                 }
             }
         }
@@ -704,14 +771,14 @@ impl Executor {
     }
 
     /// Attempt a FOK fallback after a GTD order expired or was cancelled.
-    /// Returns true if the fallback filled.
+    /// Returns Some(LiveFill) if the fallback filled, None otherwise.
     async fn try_fok_fallback(
         &mut self,
         order: &ActiveOrder,
         now: TsMicros,
         max_age_micros: i64,
         fok_price_bump: f64,
-    ) -> bool {
+    ) -> Option<LiveFill> {
         let signal_age = now - order.signal_ts;
         if signal_age > max_age_micros {
             tracing::info!(
@@ -719,23 +786,56 @@ impl Executor {
                 signal_age_s = signal_age / 1_000_000,
                 "signal too stale for FOK fallback"
             );
-            return false;
+            return None;
         }
 
-        let bump_price = (order.price + fok_price_bump).min(0.99);
+        // I1: Explicitly cancel GTD before FOK to prevent double-fill
+        // (belt-and-suspenders with auto-expiry — CLOB clock may lag local)
+        if let Some(ref trader) = self.trader {
+            let _ = trader.cancel_order(&order.order_id).await;
+        }
+
+        // C4: Re-check exposure (may have changed since GTD was placed 15s+ ago)
+        // Exclude the current order — it just expired/cancelled, not committed.
+        let pos_committed: f64 = self
+            .positions
+            .iter()
+            .map(|p| p.size_shares * p.entry_price)
+            .sum();
+        let order_committed: f64 = self
+            .active_orders
+            .values()
+            .filter(|o| o.order_id != order.order_id)
+            .map(|o| o.size_shares * o.price)
+            .sum();
+        let committed = pos_committed + order_committed;
+        let max_exposure = self.bankroll * self.max_total_exposure;
+        let available = (max_exposure - committed).max(0.0);
+        if order.decision.size_usd > available {
+            tracing::info!(
+                market_id = %order.market_id,
+                cost = order.decision.size_usd,
+                available = available,
+                "FOK fallback skipped: exposure limit"
+            );
+            return None;
+        }
+
+        // I5: Cap at 0.95 to maintain minimum R/R
+        let bump_price = (order.price + fok_price_bump).min(0.95);
         let token_id = self.token_for_trade(&order.market_id, order.side);
         let tid = match token_id {
             Some(t) => t,
-            None => return false,
+            None => return None,
         };
         let fok_shares = (order.decision.size_usd / bump_price).floor();
         if fok_shares < 1.0 {
-            return false;
+            return None;
         }
 
         let trader = match self.trader.as_ref() {
             Some(t) => t,
-            None => return false,
+            None => return None,
         };
 
         match trader.place_order(&tid, true, bump_price, fok_shares).await {
@@ -747,7 +847,7 @@ impl Executor {
                     order_id = %r.order_id,
                     price = bump_price,
                     shares = format_args!("{fok_shares:.2}"),
-                    "FOK fallback filled"
+                    "FOK fallback filled (taker)"
                 );
                 self.positions.push(OpenPosition {
                     decision_id: id,
@@ -760,14 +860,23 @@ impl Executor {
                     estimated_slippage: 0.0,
                     event_slug: order.event_slug.clone(),
                 });
-                true
+                Some(LiveFill {
+                    decision_id: id,
+                    market_id: order.market_id.clone(),
+                    side: order.side,
+                    fill_price: bump_price,
+                    size_shares: fok_shares,
+                    fee_rate: order.fee_rate,
+                    entry_ts: order.signal_ts,
+                    event_slug: order.event_slug.clone(),
+                })
             }
             Ok(_) => {
                 tracing::warn!(
                     market_id = %order.market_id,
                     "FOK fallback not matched"
                 );
-                false
+                None
             }
             Err(e) => {
                 tracing::error!(
@@ -775,23 +884,45 @@ impl Executor {
                     error = %e,
                     "FOK fallback failed"
                 );
-                false
+                None
             }
         }
     }
 
     /// Cancel all active orders (shutdown safety net).
+    /// Retries up to 3 times on failure — orphaned orders are the worst outcome.
     pub async fn cancel_all_active_orders(&mut self) {
         if let Some(ref trader) = self.trader {
-            match trader.cancel_all_orders().await {
-                Ok(n) => {
-                    tracing::info!(canceled = n, "canceled all open orders on shutdown");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "failed to cancel orders on shutdown"
-                    );
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                match trader.cancel_all_orders().await {
+                    Ok(n) => {
+                        tracing::info!(
+                            canceled = n,
+                            "canceled all open orders on shutdown"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        if attempts >= 3 {
+                            tracing::error!(
+                                error = %e,
+                                attempts,
+                                "failed to cancel orders after retries"
+                            );
+                            break;
+                        }
+                        tracing::warn!(
+                            error = %e,
+                            attempt = attempts,
+                            "cancel-all failed, retrying..."
+                        );
+                        tokio::time::sleep(
+                            tokio::time::Duration::from_secs(1),
+                        )
+                        .await;
+                    }
                 }
             }
         }

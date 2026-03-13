@@ -1,35 +1,75 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::collections::HashSet;
 
 use crate::types::{Asset, Window};
 
 /// Polymarket prediction market trading bot.
 ///
-/// Connects to Binance for real-time spot prices and Polymarket for market data.
-/// Runs Bayesian signal processing + Kelly-criterion sizing to trade crypto
-/// prediction markets.
+/// Trade crypto and weather prediction markets on Polymarket with
+/// Bayesian signals, Kelly-criterion sizing, and automated execution.
 #[derive(Parser, Debug)]
-#[command(name = "polymarket-bot", version, about)]
+#[command(name = "poly", version, about)]
 pub struct Cli {
-    /// Asset filter: btc, eth, or all
-    #[arg(long, default_value = "all", value_parser = parse_asset_filter)]
-    pub asset: AssetFilter,
+    #[command(subcommand)]
+    pub command: Command,
 
-    /// Window filter: 5m, 15m, or all
-    #[arg(long, default_value = "all", value_parser = parse_window_filter)]
-    pub window: WindowFilter,
+    /// Path to config file (default: ~/.polymarket-bot/config.toml)
+    #[arg(long, global = true)]
+    pub config: Option<String>,
 
-    /// Starting bankroll in USD (overrides config.toml)
-    #[arg(long)]
-    pub bankroll: Option<f64>,
+    /// Path to database file (default: ~/.polymarket-bot/data.db)
+    #[arg(long, global = true)]
+    pub db_path: Option<String>,
+}
 
-    /// Paper-trade mode: real market data, simulated execution
-    #[arg(long, alias = "dry-run")]
-    pub paper_trade: bool,
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Run crypto prediction market trader (BTC/ETH up/down markets)
+    Crypto {
+        /// Paper-trade mode: real market data, simulated execution
+        #[arg(long, alias = "paper")]
+        paper_trade: bool,
 
-    /// Path to config file
-    #[arg(long, default_value = "config.toml")]
-    pub config: String,
+        /// Starting bankroll in USD (overrides config.toml)
+        #[arg(long)]
+        bankroll: Option<f64>,
+
+        /// Asset filter: btc, eth, or all
+        #[arg(long, default_value = "all", value_parser = parse_asset_filter)]
+        asset: AssetFilter,
+
+        /// Window filter: 5m, 15m, or all
+        #[arg(long, default_value = "all", value_parser = parse_window_filter)]
+        window: WindowFilter,
+    },
+
+    /// Run weather prediction market trader (temperature markets)
+    Weather {
+        /// Paper-trade mode: real market data, simulated execution
+        #[arg(long, alias = "paper")]
+        paper_trade: bool,
+
+        /// Starting bankroll in USD (overrides config.toml)
+        #[arg(long)]
+        bankroll: Option<f64>,
+    },
+
+    /// Launch web dashboard (reads from DB, runs in separate terminal)
+    Dashboard {
+        /// Host interface to bind
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to serve on
+        #[arg(long, default_value_t = 3030)]
+        port: u16,
+    },
+
+    /// Show quick database status report
+    Status,
+
+    /// Remove database for clean state
+    ResetDb,
 }
 
 #[derive(Debug, Clone)]

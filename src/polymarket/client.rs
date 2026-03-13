@@ -57,7 +57,10 @@ impl PolymarketClient {
                 })
                 .count();
             if new_count > 0 {
-                tracing::info!(count = new_count, "discovered up/down markets via slug lookup");
+                tracing::info!(
+                    count = new_count,
+                    "discovered up/down markets via slug lookup"
+                );
             }
             markets.extend(updown.into_iter().filter(|m| {
                 m.condition_id
@@ -81,11 +84,7 @@ impl PolymarketClient {
 
         const ASSETS: &[&str] = &["btc", "eth"];
         // (slug label, alignment in seconds, how many windows ahead to fetch)
-        const WINDOWS: &[(&str, i64, i64)] = &[
-            ("5m", 300, 3),
-            ("15m", 900, 3),
-            ("4h", 14400, 2),
-        ];
+        const WINDOWS: &[(&str, i64, i64)] = &[("5m", 300, 3), ("15m", 900, 3), ("4h", 14400, 2)];
 
         let mut slugs = Vec::new();
         for asset in ASSETS {
@@ -196,5 +195,4 @@ impl PolymarketClient {
         let mid: MidpointResponse = resp.json().await?;
         Ok(mid.mid.and_then(|m| m.parse::<f64>().ok()).unwrap_or(0.5))
     }
-
 }

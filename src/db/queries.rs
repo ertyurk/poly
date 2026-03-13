@@ -163,7 +163,10 @@ pub struct PersistedPosition {
     pub estimated_slippage: f64,
 }
 
-pub fn save_open_position(conn: &Connection, pos: &PersistedPosition) -> Result<(), rusqlite::Error> {
+pub fn save_open_position(
+    conn: &Connection,
+    pos: &PersistedPosition,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR REPLACE INTO open_positions (decision_id, market_id, side, entry_price, size, fee_rate, entry_ts, estimated_slippage)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -176,7 +179,10 @@ pub fn save_open_position(conn: &Connection, pos: &PersistedPosition) -> Result<
 }
 
 pub fn delete_open_positions(conn: &Connection, market_id: &str) -> Result<(), rusqlite::Error> {
-    conn.execute("DELETE FROM open_positions WHERE market_id = ?1", params![market_id])?;
+    conn.execute(
+        "DELETE FROM open_positions WHERE market_id = ?1",
+        params![market_id],
+    )?;
     Ok(())
 }
 
@@ -201,7 +207,9 @@ pub fn load_open_positions(conn: &Connection) -> Result<Vec<PersistedPosition>, 
 }
 
 /// Load market metadata for all open positions (used to seed market_fetcher on restart).
-pub fn load_markets_for_open_positions(conn: &Connection) -> Result<Vec<RestoredMarket>, rusqlite::Error> {
+pub fn load_markets_for_open_positions(
+    conn: &Connection,
+) -> Result<Vec<RestoredMarket>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT m.market_id, m.condition_id, m.asset, m.window, m.token_yes, m.token_no,
                 m.resolution_ts, m.open_ts, m.open_price
@@ -264,7 +272,9 @@ pub fn last_bankroll(conn: &Connection) -> Result<Option<f64>, rusqlite::Error> 
 }
 
 pub fn max_decision_id(conn: &Connection) -> Result<i64, rusqlite::Error> {
-    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM decisions", [], |row| row.get(0))
+    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM decisions", [], |row| {
+        row.get(0)
+    })
 }
 
 // ---------------------------------------------------------------------------

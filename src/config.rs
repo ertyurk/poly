@@ -18,8 +18,17 @@ pub struct Config {
 pub struct General {
     pub mode: String,
     pub log_level: String,
+    #[serde(default = "default_db_path")]
     pub db_path: String,
     pub db_retention_days: u32,
+}
+
+fn default_db_path() -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".polymarket-bot")
+        .join("data.db")
+        .to_string_lossy()
+        .to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -45,6 +54,15 @@ pub struct Strategy {
     /// 0.03 = 3¢ spread (tight), 0.10 = 10¢ (loose).
     #[serde(default = "default_max_spread")]
     pub max_spread: f64,
+    /// Minimum spot displacement from open (%) to consider trading.
+    /// Filters out noise moves. 0.15 = 0.15% (~$120 on $80K BTC).
+    #[serde(default = "default_min_displacement_pct")]
+    pub min_displacement_pct: f64,
+    /// EMA smoothing time constant (seconds) for the market agreement midpoint filter.
+    /// Prevents brief order-book flash crashes from bypassing the filter.
+    /// Half-life ≈ tau * ln(2). Default 45s → half-life ≈ 31s.
+    #[serde(default = "default_midpoint_ema_tau")]
+    pub midpoint_ema_tau_secs: f64,
     #[serde(default)]
     pub adapt: Adapt,
     pub decay: Decay,
@@ -180,6 +198,10 @@ pub struct Execution {
     /// How often (seconds) to poll order status while GTD is resting.
     #[serde(default = "default_order_poll_interval")]
     pub order_poll_interval_secs: u64,
+    /// Price bump (in price units) added to GTD limit price for faster fills.
+    /// Bumps buy price above best_ask to increase instant fill probability.
+    #[serde(default = "default_gtd_price_bump")]
+    pub gtd_price_bump: f64,
 }
 
 fn default_gtd_expiry() -> u64 {
@@ -197,6 +219,9 @@ fn default_min_time_before_resolution() -> u64 {
 fn default_order_poll_interval() -> u64 {
     3
 }
+fn default_gtd_price_bump() -> f64 {
+    0.01
+}
 
 impl Default for Execution {
     fn default() -> Self {
@@ -204,21 +229,31 @@ impl Default for Execution {
             gtd_expiry_secs: default_gtd_expiry(),
             max_signal_age_secs: default_max_signal_age(),
             fok_price_bump: default_fok_price_bump(),
-            min_time_before_resolution_secs:
-                default_min_time_before_resolution(),
+            min_time_before_resolution_secs: default_min_time_before_resolution(),
             order_poll_interval_secs: default_order_poll_interval(),
+            gtd_price_bump: default_gtd_price_bump(),
         }
     }
+}
+
+fn default_min_displacement_pct() -> f64 {
+    0.15
 }
 
 fn default_max_spread() -> f64 {
     0.03
 }
 
+fn default_midpoint_ema_tau() -> f64 {
+    45.0
+}
+
 impl Config {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&content)?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read config at {path}: {e}"))?;
+        let config: Self = toml::from_str(&content)
+            .map_err(|e| format!("failed to parse config at {path}: {e}"))?;
         Ok(config)
     }
 }

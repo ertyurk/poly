@@ -91,7 +91,11 @@ pub fn decide(
     }
 
     // 2. Determine trade direction from midpoint
-    let side = if p_hat > p_market { Side::Yes } else { Side::No };
+    let side = if p_hat > p_market {
+        Side::Yes
+    } else {
+        Side::No
+    };
 
     // 3. Actual fill price — what we'd pay per share.
     // This is what matters for profitability, not the midpoint.
@@ -118,7 +122,11 @@ pub fn decide(
     //   Standard regime: 0.50 (R/R ≥ 1.0)
     //   Convergence regime: 0.95 (near-deterministic outcome, fees ~0)
     if fill_price < 0.05 || fill_price > max_fill_price {
-        return Err(no_trade(p_hat - p_market, SkipReason::InsufficientEdge, 0.0));
+        return Err(no_trade(
+            p_hat - p_market,
+            SkipReason::InsufficientEdge,
+            0.0,
+        ));
     }
 
     // 4c. Direction guard: never bet against our model's probability direction.
@@ -228,6 +236,8 @@ pub struct DecisionActor {
     tx: mpsc::Sender<DecisionOutput>,
     /// Cached latest market state per market_id.
     markets: std::collections::HashMap<String, MarketState>,
+    /// EMA-smoothed midpoint per market: (ema_value, last_update_ts_micros).
+    midpoint_ema: std::collections::HashMap<String, (f64, i64)>,
     /// Markets with pending (unfilled or open) positions — suppress duplicate decisions.
     pending: std::collections::HashSet<String>,
     /// Configuration
@@ -238,6 +248,8 @@ pub struct DecisionActor {
     max_volume_pct: f64,
     max_bet_fraction: f64,
     adapt: crate::config::Adapt,
+    midpoint_ema_tau: f64,
+    min_displacement_pct: f64,
 }
 
 impl DecisionActor {
@@ -252,11 +264,14 @@ impl DecisionActor {
         max_volume_pct: f64,
         max_bet_fraction: f64,
         adapt: crate::config::Adapt,
+        midpoint_ema_tau: f64,
+        min_displacement_pct: f64,
     ) -> Self {
         Self {
             rx,
             tx,
             markets: std::collections::HashMap::new(),
+            midpoint_ema: std::collections::HashMap::new(),
             pending: std::collections::HashSet::new(),
             tau_min,
             b,
@@ -265,6 +280,8 @@ impl DecisionActor {
             max_volume_pct,
             max_bet_fraction,
             adapt,
+            midpoint_ema_tau,
+            min_displacement_pct,
         }
     }
 
@@ -272,6 +289,18 @@ impl DecisionActor {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 DecisionInput::Market(ms) => {
+                    let now = crate::types::now_micros();
+                    let mid = ms.midpoint;
+                    let ema = self
+                        .midpoint_ema
+                        .entry(ms.market_id.clone())
+                        .or_insert((mid, now));
+                    let dt_secs =
+                        (now - ema.1).max(0) as f64 / 1_000_000.0;
+                    let alpha = 1.0
+                        - (-dt_secs / self.midpoint_ema_tau).exp();
+                    ema.0 = alpha * mid + (1.0 - alpha) * ema.0;
+                    ema.1 = now;
                     self.markets.insert(ms.market_id.clone(), ms);
                 }
                 DecisionInput::BankrollUpdate(b) => {
@@ -326,15 +355,19 @@ impl DecisionActor {
                     }
 
                     // Market agreement: don't bet against strong market conviction.
-                    // Data: YES trades win 33%, NO trades win 86%.
-                    // YES bets on small upticks during downtrends are the main loss driver.
-                    // Require the market to not strongly disagree with our direction.
+                    // Uses EMA-smoothed midpoint (tau=45s) to prevent brief
+                    // order-book flash crashes from bypassing the filter.
                     let signal_yes = sig.p_hat > 0.5;
-                    if signal_yes && ms.midpoint < 0.40 {
+                    let ema_mid = self
+                        .midpoint_ema
+                        .get(&sig.market_id)
+                        .map(|e| e.0)
+                        .unwrap_or(ms.midpoint);
+                    if signal_yes && ema_mid < 0.40 {
                         // Market strongly says NO (60%+ conviction) — don't bet YES
                         continue;
                     }
-                    if !signal_yes && ms.midpoint > 0.60 {
+                    if !signal_yes && ema_mid > 0.60 {
                         // Market strongly says YES (60%+ conviction) — don't bet NO
                         continue;
                     }
@@ -342,8 +375,7 @@ impl DecisionActor {
                     // Displacement gate: require meaningful move.
                     // Convergence doesn't need displacement — the accumulated
                     // position near expiry IS the signal.
-                    const MIN_DISPLACEMENT_PCT: f64 = 0.05;
-                    if sig.displacement_pct.abs() < MIN_DISPLACEMENT_PCT {
+                    if sig.displacement_pct.abs() < self.min_displacement_pct {
                         continue;
                     }
 

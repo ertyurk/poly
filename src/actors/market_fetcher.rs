@@ -113,8 +113,14 @@ impl MarketFetcher {
         book_tick.tick().await;
 
         // Initial discovery
-        self.discover_markets(&mut tracked, &mut skipped, &market_tx_signal, &market_tx_decision, &db_tx)
-            .await;
+        self.discover_markets(
+            &mut tracked,
+            &mut skipped,
+            &market_tx_signal,
+            &market_tx_decision,
+            &db_tx,
+        )
+        .await;
 
         loop {
             tokio::select! {
@@ -218,8 +224,7 @@ impl MarketFetcher {
 
             // Skip illiquid markets (spread exceeds configured max or no real order book)
             if book.spread > self.max_spread
-                || (book.best_bid < f64::EPSILON
-                    && book.best_ask > 1.0 - f64::EPSILON)
+                || (book.best_bid < f64::EPSILON && book.best_ask > 1.0 - f64::EPSILON)
             {
                 tracing::debug!(
                     question,
@@ -662,10 +667,7 @@ fn determine_outcome_from_clob(cm: &crate::polymarket::types::ClobMarket) -> Opt
                 "Yes" | "Up" => Side::Yes,
                 "No" | "Down" => Side::No,
                 _ => {
-                    tracing::warn!(
-                        outcome = outcome,
-                        "unknown winning outcome label"
-                    );
+                    tracing::warn!(outcome = outcome, "unknown winning outcome label");
                     continue;
                 }
             };
@@ -737,16 +739,13 @@ mod tests {
     #[test]
     fn clob_no_winner_false_both() {
         // Both false — market resolved but no winner? Return None
-        let cm =
-            make_clob_market(vec![token("Up", Some(false)), token("Down", Some(false))]);
+        let cm = make_clob_market(vec![token("Up", Some(false)), token("Down", Some(false))]);
         assert_eq!(determine_outcome_from_clob(&cm), None);
     }
 
     #[test]
     fn clob_no_tokens() {
-        let cm = ClobMarket {
-            tokens: None,
-        };
+        let cm = ClobMarket { tokens: None };
         assert_eq!(determine_outcome_from_clob(&cm), None);
     }
 }
