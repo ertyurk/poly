@@ -262,6 +262,54 @@ pub fn insert_fill_rejection(
     Ok(())
 }
 
+pub fn insert_weather_forecast(
+    conn: &Connection,
+    city: &str,
+    target_date: &str,
+    model: &str,
+    member: i32,
+    temp_max: f64,
+    fetched_ts: TsMicros,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO weather_forecasts (city, target_date, model, member, temp_max, fetched_ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![city, target_date, model, member, temp_max, fetched_ts],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_weather_market(
+    conn: &Connection,
+    event_id: &str,
+    city: &str,
+    target_date: &str,
+    bucket_index: i32,
+    bucket_label: &str,
+    bucket_lo: Option<f64>,
+    bucket_hi: Option<f64>,
+    token_yes: &str,
+    token_no: &str,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    midpoint: Option<f64>,
+    p_ensemble: Option<f64>,
+    edge: Option<f64>,
+    ts: TsMicros,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO weather_markets (event_id, city, target_date, bucket_index, bucket_label, bucket_lo, bucket_hi, token_yes, token_no, best_bid, best_ask, midpoint, p_ensemble, edge, ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            event_id, city, target_date, bucket_index, bucket_label,
+            bucket_lo, bucket_hi, token_yes, token_no,
+            best_bid, best_ask, midpoint, p_ensemble, edge, ts,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn last_bankroll(conn: &Connection) -> Result<Option<f64>, rusqlite::Error> {
     conn.query_row(
         "SELECT bankroll_after FROM trades ORDER BY resolved_ts DESC LIMIT 1",

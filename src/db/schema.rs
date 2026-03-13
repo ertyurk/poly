@@ -72,6 +72,45 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         );",
     )?;
 
+    // Migration: create weather_forecasts table
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS weather_forecasts (
+            id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            model TEXT NOT NULL,
+            member INTEGER NOT NULL,
+            temp_max REAL NOT NULL,
+            fetched_ts INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_wf_city_date
+            ON weather_forecasts(city, target_date);",
+    )?;
+
+    // Migration: create weather_markets table
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS weather_markets (
+            id INTEGER PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            bucket_index INTEGER NOT NULL,
+            bucket_label TEXT NOT NULL,
+            bucket_lo REAL,
+            bucket_hi REAL,
+            token_yes TEXT NOT NULL,
+            token_no TEXT NOT NULL,
+            best_bid REAL,
+            best_ask REAL,
+            midpoint REAL,
+            p_ensemble REAL,
+            edge REAL,
+            ts INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_wm_city_date
+            ON weather_markets(city, target_date);",
+    )?;
+
     Ok(())
 }
 

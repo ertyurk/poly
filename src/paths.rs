@@ -118,4 +118,11 @@ fok_price_bump = 0.03
 gtd_price_bump = 0.01
 min_time_before_resolution_secs = 60
 order_poll_interval_secs = 1
+
+[weather]
+poll_interval_secs = 1800
+max_forecast_horizon_hours = 36
+edge_threshold = 0.03
+max_tail_price = 0.10
+tail_buckets = 3
 "#;

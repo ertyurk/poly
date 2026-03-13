@@ -5,3 +5,4 @@ data/bot.db-wal
 data/bot.db-shm
 data/bot.db.paper
 .env
+dev_weather.db

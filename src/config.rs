@@ -12,6 +12,8 @@ pub struct Config {
     pub telegram: Option<Telegram>,
     #[serde(default)]
     pub execution: Execution,
+    #[serde(default)]
+    pub weather: Weather,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -234,6 +236,48 @@ impl Default for Execution {
             gtd_price_bump: default_gtd_price_bump(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Weather {
+    #[serde(default = "default_weather_poll_interval")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_max_forecast_horizon")]
+    pub max_forecast_horizon_hours: u64,
+    #[serde(default = "default_edge_threshold")]
+    pub edge_threshold: f64,
+    #[serde(default = "default_max_tail_price")]
+    pub max_tail_price: f64,
+    #[serde(default = "default_tail_buckets")]
+    pub tail_buckets: u8,
+}
+
+impl Default for Weather {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_weather_poll_interval(),
+            max_forecast_horizon_hours: default_max_forecast_horizon(),
+            edge_threshold: default_edge_threshold(),
+            max_tail_price: default_max_tail_price(),
+            tail_buckets: default_tail_buckets(),
+        }
+    }
+}
+
+const fn default_weather_poll_interval() -> u64 {
+    1800
+}
+const fn default_max_forecast_horizon() -> u64 {
+    36
+}
+const fn default_edge_threshold() -> f64 {
+    0.03
+}
+const fn default_max_tail_price() -> f64 {
+    0.10
+}
+const fn default_tail_buckets() -> u8 {
+    3
 }
 
 fn default_min_displacement_pct() -> f64 {
