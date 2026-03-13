@@ -10,3 +10,4 @@ pub mod math;
 pub mod paths;
 pub mod polymarket;
 pub mod types;
+pub mod weather;
