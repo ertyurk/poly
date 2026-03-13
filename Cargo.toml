@@ -6,9 +6,9 @@ default-run = "poly"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 futures-util = "0.3"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -29,13 +29,13 @@ bytes = "1"
 
 # Polymarket official SDK (authenticated trading)
 polymarket-client-sdk = { version = "0.4", features = ["clob"] }
-alloy = { version = "1.6", default-features = false, features = ["signer-local", "signers", "contract", "provider-http"] }
+alloy = { version = "1.7", default-features = false, features = ["signer-local", "signers", "contract", "provider-http"] }
 rust_decimal = "1.40"
 rust_decimal_macros = "1.40"
 
 # Legacy deps still used
 hex = "0.4"
-dirs = "5"
+dirs = "6"
 
 [dev-dependencies]
 tempfile = "3"
