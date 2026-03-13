@@ -8,6 +8,7 @@ mod math;
 mod paths;
 mod polymarket;
 mod types;
+mod weather;
 
 use actors::decision::{DecisionActor, DecisionInput, DecisionOutput};
 use actors::executor::{Executor, GtdResult, Mode};
@@ -36,9 +37,11 @@ fn get_private_key() -> Result<String, String> {
     if let Some(key) = COMPILED_PRIVATE_KEY {
         return Ok(key.to_string());
     }
-    std::env::var("PRIVATE_KEY")
-        .map_err(|_| "PRIVATE_KEY not set. Build with: PRIVATE_KEY=xxx cargo install --path . \
-                       Or set PRIVATE_KEY env var.".to_string())
+    std::env::var("PRIVATE_KEY").map_err(|_| {
+        "PRIVATE_KEY not set. Build with: PRIVATE_KEY=xxx cargo install --path . \
+                       Or set PRIVATE_KEY env var."
+            .to_string()
+    })
 }
 
 #[tokio::main]
@@ -59,24 +62,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bankroll,
             asset,
             window,
-        } => {
-            run_crypto(&app_paths, paper_trade, bankroll, asset, window).await
-        }
+        } => run_crypto(&app_paths, paper_trade, bankroll, asset, window).await,
         Command::Weather {
             paper_trade,
             bankroll,
-        } => {
-            run_weather(&app_paths, paper_trade, bankroll).await
-        }
-        Command::Dashboard { host, port } => {
-            run_dashboard(&app_paths, &host, port).await
-        }
-        Command::Status => {
-            run_status(&app_paths)
-        }
-        Command::ResetDb => {
-            run_reset_db(&app_paths)
-        }
+        } => run_weather(&app_paths, paper_trade, bankroll).await,
+        Command::Dashboard { host, port } => run_dashboard(&app_paths, &host, port).await,
+        Command::Status => run_status(&app_paths),
+        Command::ResetDb => run_reset_db(&app_paths),
     }
 }
 
@@ -164,7 +157,7 @@ fn run_status(paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("╔════════════════════════════════════════════╗");
     eprintln!("║         POLYMARKET BOT STATUS              ║");
     eprintln!("╠════════════════════════════════════════════╣");
-    eprintln!("║  DB: {:<39}║", db_short);
+    eprintln!("║  DB: {:<38}║", db_short);
     eprintln!("║  Spot ticks:     {:<26}║", format_num(spot_ticks));
     eprintln!("║  Active markets: {:<26}║", active_mkts);
     eprintln!("║  Decisions:      {:<26}║", format_num(decisions));
@@ -172,12 +165,76 @@ fn run_status(paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("║  Top skip:       {:<26}║", skip_short);
     eprintln!("╠════════════════════════════════════════════╣");
     eprintln!("║  Trades:         {:<26}║", trades);
-    eprintln!("║  Wins/Losses:    {:<26}║", format!("{total_wins}/{total_losses}"));
+    eprintln!(
+        "║  Wins/Losses:    {:<26}║",
+        format!("{total_wins}/{total_losses}")
+    );
     eprintln!("║  P&L:            {:<26}║", format!("${total_pnl:+.2}"));
     eprintln!("║  Bankroll:       {:<26}║", format!("${bankroll:.2}"));
     eprintln!("║  Open positions: {:<26}║", open_positions);
     eprintln!("║  Fill rejects:   {:<26}║", rejections);
     eprintln!("╚════════════════════════════════════════════╝");
+
+    // Weather section (only if weather tables exist)
+    let has_weather: bool = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='weather_markets'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+
+    if has_weather {
+        let wx_markets: i64 = conn
+            .query_row(
+                "SELECT count(DISTINCT city || target_date) FROM weather_markets",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let wx_signals: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM weather_markets WHERE edge > 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let wx_trades: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM trades WHERE market_id LIKE 'WX_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let (wx_wins, wx_losses, wx_pnl): (i64, i64, f64) = conn
+            .query_row(
+                "SELECT COALESCE(sum(case when outcome='WIN' then 1 else 0 end), 0),
+                        COALESCE(sum(case when outcome='LOSS' then 1 else 0 end), 0),
+                        COALESCE(sum(pnl), 0.0)
+                 FROM trades WHERE market_id LIKE 'WX_%'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap_or((0, 0, 0.0));
+
+        eprintln!("╔════════════════════════════════════════════╗");
+        eprintln!("║         WEATHER STATUS                     ║");
+        eprintln!("╠════════════════════════════════════════════╣");
+        eprintln!("║  City-dates:     {:<26}║", wx_markets);
+        eprintln!("║  Tail signals:   {:<26}║", wx_signals);
+        eprintln!("╠════════════════════════════════════════════╣");
+        eprintln!("║  Trades:         {:<26}║", wx_trades);
+        eprintln!(
+            "║  Wins/Losses:    {:<26}║",
+            format!("{wx_wins}/{wx_losses}")
+        );
+        eprintln!(
+            "║  P&L:            {:<26}║",
+            format!("${wx_pnl:+.2}")
+        );
+        eprintln!("╚════════════════════════════════════════════╝");
+    }
 
     Ok(())
 }
@@ -345,12 +402,13 @@ async fn run_dashboard(
     Ok(())
 }
 
-// ─── Weather (placeholder) ───────────────────────────────────────────────────
+// ─── Weather ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 async fn run_weather(
     paths: &AppPaths,
-    _paper_trade: bool,
-    _bankroll: Option<f64>,
+    paper_trade: bool,
+    bankroll_override: Option<f64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     paths.ensure_config()?;
     paths.ensure_dirs()?;
@@ -363,9 +421,453 @@ async fn run_weather(
         )
         .init();
 
-    tracing::info!("weather trading module not yet implemented");
-    tracing::info!("coming soon: temperature prediction markets across 20 cities");
+    let mut config = config::Config::load(&paths.config_str())?;
+    config.general.db_path = paths.db_str();
 
+    let mode_str = if paper_trade { "paper" } else { "real" };
+
+    // Restore bankroll from DB if available
+    let startup_conn = db::init(&config.general.db_path)?;
+    let bankroll = if let Some(b) = bankroll_override {
+        b
+    } else if let Ok(Some(last)) = db::queries::last_bankroll(&startup_conn) {
+        tracing::info!(
+            bankroll = format_args!("${last:.2}"),
+            "restored bankroll from DB"
+        );
+        last
+    } else {
+        config.bankroll.initial
+    };
+    let next_decision_id =
+        db::queries::max_decision_id(&startup_conn).unwrap_or(0) + 1;
+    drop(startup_conn);
+
+    tracing::info!(
+        mode = mode_str,
+        bankroll = format_args!("${bankroll:.2}"),
+        poll_secs = config.weather.poll_interval_secs,
+        horizon_h = config.weather.max_forecast_horizon_hours,
+        "weather config loaded"
+    );
+
+    // Build LiveTrader for live mode
+    let live_trader: Option<LiveTrader> = if paper_trade {
+        None
+    } else {
+        let private_key =
+            get_private_key().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        Some(
+            LiveTrader::connect(&private_key)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e })?,
+        )
+    };
+
+    // Shutdown watch channel
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // DB writer channel + actor
+    let (db_tx, db_rx) = mpsc::channel::<DbEvent>(10_000);
+    let mut writer = WriterActor::new(
+        &config.general.db_path,
+        config.writer.batch_size,
+        config.writer.flush_interval_ms,
+    )?;
+    let writer_handle = tokio::spawn(async move {
+        writer.run(db_rx).await;
+    });
+
+    // Send config snapshot
+    {
+        let config_json = serde_json::to_string(&config)?;
+        let _ = db_tx
+            .send(DbEvent::ConfigSnapshot {
+                config_json,
+                ts: now_micros(),
+            })
+            .await;
+    }
+
+    // Executor
+    let exec_mode = if paper_trade { Mode::Paper } else { Mode::Live };
+    let mut executor = Executor::new(
+        exec_mode,
+        bankroll,
+        live_trader,
+        config.strategy.max_total_exposure,
+    );
+    executor.set_next_decision_id(next_decision_id);
+
+    // Telegram alert actor
+    let (telegram_tx, tg_stats): (
+        Option<mpsc::Sender<TelegramAlert>>,
+        Option<Arc<TelegramStats>>,
+    ) = if let Some(ref tg) = config.telegram {
+        if tg.enabled {
+            let stats = Arc::new(TelegramStats::new(bankroll));
+            let (tg_tx, tg_rx) = mpsc::channel::<TelegramAlert>(100);
+            let actor = TelegramActor::new(
+                tg.bot_token.clone(),
+                tg.chat_id.clone(),
+                tg.summary_interval_mins,
+                Arc::clone(&stats),
+            );
+            let tg_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                actor.run(tg_rx, tg_shutdown).await;
+            });
+            tracing::info!("telegram alerts enabled for weather");
+            (Some(tg_tx), Some(stats))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    tracing::info!(
+        "poly v{} weather — {mode_str} — ${bankroll:.2} bankroll",
+        env!("CARGO_PKG_VERSION"),
+    );
+    tracing::info!("press Ctrl+C to stop");
+
+    // Separate DB connection for weather-specific inserts
+    // (avoids modifying the shared DbEvent enum in types.rs)
+    let wx_conn = db::init(&config.general.db_path)?;
+
+    // HTTP client for API calls
+    let http = reqwest::Client::new();
+    let gamma_url = format!(
+        "{}/events?tag=weather&closed=false&limit=50",
+        config.polymarket.gamma_url
+    );
+    let poll_duration = tokio::time::Duration::from_secs(
+        config.weather.poll_interval_secs,
+    );
+    let wx_config = config.weather.clone();
+
+    let mut poll_interval = tokio::time::interval(poll_duration);
+    // First tick fires immediately
+    poll_interval.tick().await;
+
+    let mut trades_placed: u32 = 0;
+    let mut trades_skipped: u32 = 0;
+    let total_pnl: f64 = 0.0;
+    let wins: u32 = 0;
+    let losses: u32 = 0;
+
+    loop {
+        tokio::select! {
+            _ = poll_interval.tick() => {
+                let events = match weather::fetcher::fetch_weather_events(
+                    &http, &gamma_url,
+                ).await {
+                    Ok(evts) => evts,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to fetch weather events");
+                        continue;
+                    }
+                };
+
+                let now_ts = now_micros();
+                let horizon_micros =
+                    wx_config.max_forecast_horizon_hours as i64 * 3_600 * 1_000_000;
+
+                for event in &events {
+                    // Parse end_date to micros for horizon check
+                    let end_ts = chrono::DateTime::parse_from_rfc3339(&event.end_date)
+                        .map(|dt| dt.timestamp_micros())
+                        .unwrap_or(i64::MAX);
+
+                    if end_ts - now_ts > horizon_micros || end_ts < now_ts {
+                        continue;
+                    }
+
+                    let city_cfg = match weather::types::CityConfig::find(&event.city) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+
+                    let temps = match weather::forecast::fetch_ensemble(
+                        &http, city_cfg, &event.target_date,
+                    ).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!(
+                                city = %event.city,
+                                date = %event.target_date,
+                                error = %e,
+                                "failed to fetch ensemble"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let bucket_structs: Vec<_> = event.buckets.iter()
+                        .map(|bm| bm.bucket.clone())
+                        .collect();
+                    let probs = weather::forecast::bucket_probabilities(
+                        &bucket_structs, &temps,
+                    );
+                    let market_prices: Vec<f64> = event.buckets.iter()
+                        .map(|bm| bm.midpoint)
+                        .collect();
+
+                    // Persist forecast members (direct DB write)
+                    for (i, &t) in temps.iter().enumerate() {
+                        let _ = db::queries::insert_weather_forecast(
+                            &wx_conn,
+                            &event.city,
+                            &event.target_date,
+                            "ensemble",
+                            i as i32,
+                            t,
+                            now_ts,
+                        );
+                    }
+
+                    // Persist market snapshots and register markets
+                    for (i, bm) in event.buckets.iter().enumerate() {
+                        let wx_market_id = weather::types::weather_market_id(
+                            &event.city, &event.target_date, bm.bucket.index,
+                        );
+
+                        executor.register_market(
+                            &wx_market_id,
+                            &bm.token_yes,
+                            &bm.token_no,
+                            end_ts,
+                        );
+
+                        let p_ens = probs.get(i).copied();
+                        let edge_val = p_ens.map(|p| p - bm.midpoint);
+
+                        let _ = db::queries::insert_weather_market(
+                            &wx_conn,
+                            &event.event_id,
+                            &event.city,
+                            &event.target_date,
+                            bm.bucket.index as i32,
+                            &bm.label,
+                            bm.bucket.lo,
+                            bm.bucket.hi,
+                            &bm.token_yes,
+                            &bm.token_no,
+                            Some(bm.best_bid),
+                            Some(bm.best_ask),
+                            Some(bm.midpoint),
+                            p_ens,
+                            edge_val,
+                            now_ts,
+                        );
+                    }
+
+                    // Find tail edges
+                    let edges = weather::signal::find_tail_edges(
+                        &market_prices,
+                        &probs,
+                        wx_config.tail_buckets,
+                        wx_config.max_tail_price,
+                        wx_config.edge_threshold,
+                    );
+
+                    for edge in &edges {
+                        let bm = &event.buckets[edge.bucket_index as usize];
+                        let wx_market_id = weather::types::weather_market_id(
+                            &event.city, &event.target_date, edge.bucket_index,
+                        );
+
+                        tracing::info!(
+                            city = %event.city,
+                            date = %event.target_date,
+                            bucket = edge.bucket_index,
+                            p_ensemble = format_args!("{:.3}", edge.p_ensemble),
+                            market_price = format_args!("{:.3}", edge.market_price),
+                            edge = format_args!("{:.3}", edge.edge),
+                            "weather tail edge"
+                        );
+
+                        // Call decide() directly — bypass DecisionActor's
+                        // crypto-specific filters.
+                        let result = actors::decision::decide(
+                            edge.p_ensemble,
+                            bm.midpoint,
+                            config.strategy.tau_min,
+                            config.strategy.liquidity_b,
+                            config.strategy.kelly_fraction,
+                            executor.bankroll(),
+                            10_000.0, // weather volume placeholder
+                            config.strategy.max_volume_pct,
+                            config.strategy.max_bet_fraction,
+                            0.0, // min_confidence: ensemble is high confidence
+                            1.0, // confidence: 1.0 for ensemble-based
+                            &wx_market_id,
+                            bm.best_bid,
+                            bm.best_ask,
+                            &format!(
+                                "wx-{}-{}",
+                                event.city, event.target_date
+                            ),
+                            0.95, // max_fill_price: tail buckets are cheap
+                        );
+
+                        match result {
+                            Ok(dec) => {
+                                // Paper mode: try_fill directly
+                                if exec_mode == Mode::Paper {
+                                    match executor
+                                        .try_fill(&dec, dec.best_ask, dec.best_bid)
+                                        .await
+                                    {
+                                        Ok(fill) => {
+                                            trades_placed += 1;
+                                            if let Some(ref stats) = tg_stats {
+                                                stats.record_fill();
+                                            }
+                                            if let Some(ref tg) = telegram_tx {
+                                                let _ = tg.try_send(
+                                                    TelegramAlert::TradeFilled {
+                                                        decision: dec.clone(),
+                                                        fill_price: fill.fill_price,
+                                                    },
+                                                );
+                                            }
+                                            let _ = db_tx.try_send(
+                                                DbEvent::SaveOpenPosition {
+                                                    decision_id: fill.decision_id,
+                                                    market_id: dec.market_id.clone(),
+                                                    side: dec.side,
+                                                    entry_price: fill.fill_price,
+                                                    size: fill.size_shares,
+                                                    fee_rate: dec.fee_rate,
+                                                    entry_ts: dec.ts,
+                                                    estimated_slippage:
+                                                        fill.estimated_slippage,
+                                                },
+                                            );
+                                            let _ = db_tx.try_send(
+                                                DbEvent::Decision(dec),
+                                            );
+                                        }
+                                        Err(reason) => {
+                                            tracing::debug!(
+                                                market = %dec.market_id,
+                                                reason = %reason,
+                                                "weather fill rejected"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // Live mode: GTD order
+                                    let res_ts = executor.market_resolution_ts(
+                                        &dec.market_id,
+                                    );
+                                    match executor.try_place_gtd(
+                                        &dec,
+                                        dec.best_ask,
+                                        dec.best_bid,
+                                        config.execution.gtd_expiry_secs,
+                                        res_ts,
+                                        config.execution
+                                            .min_time_before_resolution_secs,
+                                        config.execution.gtd_price_bump,
+                                    ).await {
+                                        Ok(GtdResult::InstantFill(fill)) => {
+                                            trades_placed += 1;
+                                            if let Some(ref stats) = tg_stats {
+                                                stats.record_fill();
+                                            }
+                                            if let Some(ref tg) = telegram_tx {
+                                                let _ = tg.try_send(
+                                                    TelegramAlert::GtdOrderFilled {
+                                                        market_id:
+                                                            fill.market_id.clone(),
+                                                        side: fill.side,
+                                                        price: fill.fill_price,
+                                                        maker: true,
+                                                    },
+                                                );
+                                            }
+                                            let _ = db_tx.try_send(
+                                                DbEvent::SaveOpenPosition {
+                                                    decision_id: fill.decision_id,
+                                                    market_id:
+                                                        fill.market_id.clone(),
+                                                    side: fill.side,
+                                                    entry_price: fill.fill_price,
+                                                    size: fill.size_shares,
+                                                    fee_rate: fill.fee_rate,
+                                                    entry_ts: fill.entry_ts,
+                                                    estimated_slippage: 0.0,
+                                                },
+                                            );
+                                            let _ = db_tx.try_send(
+                                                DbEvent::Decision(dec),
+                                            );
+                                        }
+                                        Ok(GtdResult::Resting(_order_id)) => {
+                                            let _ = db_tx.try_send(
+                                                DbEvent::Decision(dec),
+                                            );
+                                        }
+                                        Err(reason) => {
+                                            tracing::debug!(
+                                                market = %dec.market_id,
+                                                reason = %reason,
+                                                "weather GTD rejected"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(nt) => {
+                                trades_skipped += 1;
+                                let _ = db_tx.try_send(DbEvent::Skip(nt));
+                            }
+                        }
+                    }
+
+                    // Brief delay between cities to avoid API rate limits
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+
+                tracing::info!(
+                    events = events.len(),
+                    bankroll = format_args!("${:.2}", executor.bankroll()),
+                    trades = trades_placed,
+                    skips = trades_skipped,
+                    "weather poll complete"
+                );
+            }
+
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("weather shutting down...");
+                break;
+            }
+        }
+    }
+
+    // Final summary
+    let final_bankroll = executor.bankroll();
+    let return_pct = (final_bankroll - bankroll) / bankroll * 100.0;
+
+    tracing::info!("══════════════════════════════════════════");
+    tracing::info!("       WEATHER TRADING SUMMARY ({mode_str})    ");
+    tracing::info!("══════════════════════════════════════════");
+    tracing::info!("  Trades placed:      {trades_placed}");
+    tracing::info!("  Signals skipped:    {trades_skipped}");
+    tracing::info!("  Wins / Losses:      {wins} / {losses}");
+    tracing::info!("  Net P&L:            {total_pnl:+.2}");
+    tracing::info!("  Starting bankroll:  ${bankroll:.2}");
+    tracing::info!("  Final bankroll:     ${final_bankroll:.2}");
+    tracing::info!("  Return:             {return_pct:+.2}%");
+    tracing::info!("══════════════════════════════════════════");
+
+    // Drop db_tx to close the channel; writer will flush remaining events
+    drop(db_tx);
+    let _ = writer_handle.await;
+    tracing::info!("weather shutdown complete");
     Ok(())
 }
 
@@ -427,8 +929,8 @@ async fn run_crypto(
     let live_trader: Option<LiveTrader> = if paper_trade {
         None
     } else {
-        let private_key = get_private_key()
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let private_key =
+            get_private_key().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         Some(
             LiveTrader::connect(&private_key)
