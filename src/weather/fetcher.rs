@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use crate::weather::types::{Bucket, CityConfig};
 
 // ── Public structs ────────────────────────────────────────────────
@@ -16,6 +17,7 @@ pub struct WeatherEvent {
 #[derive(Debug, Clone)]
 pub struct BucketMarket {
     pub market_id: String,
+    pub condition_id: String,
     pub label: String,
     pub bucket: Bucket,
     pub threshold: u8,
@@ -131,11 +133,12 @@ pub fn parse_weather_event(json: &serde_json::Value) -> Option<WeatherEvent> {
 
     for (idx, m) in markets.iter().enumerate() {
         let market_id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
-        let label = m.get("groupItemTitle").and_then(|v| v.as_str())?;
-        let bucket = Bucket::parse(label)?;
+        let condition_id = m.get("conditionId").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let Some(label) = m.get("groupItemTitle").and_then(|v| v.as_str()) else { continue };
+        let Some(bucket) = Bucket::parse(label) else { continue };
 
-        let clob_raw = m.get("clobTokenIds").and_then(|v| v.as_str())?;
-        let (token_yes, token_no) = parse_clob_token_ids(clob_raw)?;
+        let Some(clob_raw) = m.get("clobTokenIds").and_then(|v| v.as_str()) else { continue };
+        let Some((token_yes, token_no)) = parse_clob_token_ids(clob_raw) else { continue };
 
         let best_bid = m
             .get("bestBid")
@@ -156,6 +159,7 @@ pub fn parse_weather_event(json: &serde_json::Value) -> Option<WeatherEvent> {
 
         buckets.push(BucketMarket {
             market_id,
+            condition_id,
             label: label.to_owned(),
             bucket,
             threshold: idx as u8,
@@ -193,18 +197,91 @@ pub fn parse_weather_event(json: &serde_json::Value) -> Option<WeatherEvent> {
     })
 }
 
-/// Fetch weather events from the Gamma Events API.
+/// Month number → lowercase name for slug generation.
+fn month_name(month: u32) -> &'static str {
+    match month {
+        1 => "january", 2 => "february", 3 => "march",
+        4 => "april", 5 => "may", 6 => "june",
+        7 => "july", 8 => "august", 9 => "september",
+        10 => "october", 11 => "november", 12 => "december",
+        _ => "unknown",
+    }
+}
+
+/// Map canonical city name to its slug form used in Polymarket event URLs.
+fn city_slug(city_name: &str) -> &str {
+    match city_name {
+        "nyc" => "new-york-city",
+        "sao_paulo" => "sao-paulo",
+        "tel_aviv" => "tel-aviv",
+        "buenos_aires" => "buenos-aires",
+        _ => city_name,
+    }
+}
+
+/// Fetch weather events via slug-based discovery.
+///
+/// Weather events have predictable slugs: `highest-temperature-in-{city}-on-{month}-{day}-{year}`.
+/// We generate slugs for all 20 cities × next `days_ahead` days and fetch each.
+/// This bypasses the Gamma API tag search which hides weather events.
 pub async fn fetch_weather_events(
     http: &reqwest::Client,
     gamma_url: &str,
 ) -> Result<Vec<WeatherEvent>, Box<dyn std::error::Error + Send + Sync>> {
-    let resp = http.get(gamma_url).send().await?;
-    let json: serde_json::Value = resp.json().await?;
+    let base = gamma_url.trim_end_matches('/');
+    let today = chrono::Utc::now().date_naive();
+    let mut events = Vec::new();
 
-    let events = json
-        .as_array()
-        .map(|arr| arr.iter().filter_map(parse_weather_event).collect())
-        .unwrap_or_default();
+    // Check today + next 2 days
+    for day_offset in 0..3_i64 {
+        let date = today + chrono::Duration::days(day_offset);
+        let month = month_name(date.month());
+        let day_num = date.day();
+        let year = date.year();
+
+        for city in crate::weather::types::CITIES {
+            let slug = format!(
+                "highest-temperature-in-{}-on-{}-{}-{}",
+                city_slug(city.name), month, day_num, year
+            );
+            let url = format!("{base}/events?slug={slug}");
+
+            match http.get(&url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            if let Some(arr) = json.as_array() {
+                                tracing::debug!(city = city.name, slug = %slug, count = arr.len(), "slug response");
+                                for evt_json in arr {
+                                    match parse_weather_event(evt_json) {
+                                        Some(evt) => {
+                                            tracing::info!(city = %evt.city, date = %evt.target_date, buckets = evt.buckets.len(), "discovered weather event");
+                                            events.push(evt);
+                                        }
+                                        None => {
+                                            tracing::warn!(city = city.name, slug = %slug, "event parse failed");
+                                        }
+                                    }
+                                }
+                            } else {
+                                tracing::debug!(city = city.name, slug = %slug, %status, "non-array response");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(city = city.name, %status, %e, "json parse failed");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(city = city.name, %e, "failed to fetch weather event");
+                }
+            }
+
+            // Small delay to avoid hammering the API
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+    }
 
     Ok(events)
 }

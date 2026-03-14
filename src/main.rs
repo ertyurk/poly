@@ -538,24 +538,25 @@ async fn run_weather(
 
     // HTTP client for API calls
     let http = reqwest::Client::new();
-    let gamma_url = format!(
-        "{}/events?tag=weather&closed=false&limit=50",
-        config.polymarket.gamma_url
-    );
+    let gamma_url = config.polymarket.gamma_url.clone();
     let poll_duration = tokio::time::Duration::from_secs(
         config.weather.poll_interval_secs,
     );
     let wx_config = config.weather.clone();
 
     let mut poll_interval = tokio::time::interval(poll_duration);
-    // First tick fires immediately
-    poll_interval.tick().await;
+    // interval's first tick() returns immediately, so the loop body fires on startup
 
     let mut trades_placed: u32 = 0;
     let mut trades_skipped: u32 = 0;
-    let total_pnl: f64 = 0.0;
-    let wins: u32 = 0;
-    let losses: u32 = 0;
+    let mut total_pnl: f64 = 0.0;
+    let mut wins: u32 = 0;
+    let mut losses: u32 = 0;
+
+    // Map wx_market_id → condition_id for settlement CLOB lookups
+    let mut wx_condition_ids: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let clob_url = config.polymarket.clob_url.clone();
 
     loop {
         tokio::select! {
@@ -640,6 +641,31 @@ async fn run_weather(
                             end_ts,
                         );
 
+                        // Track condition_id for settlement lookups
+                        if !bm.condition_id.is_empty() {
+                            wx_condition_ids.insert(
+                                wx_market_id.clone(),
+                                bm.condition_id.clone(),
+                            );
+                        }
+
+                        // Register market in DB so FK constraints on decisions/trades pass
+                        let _ = wx_conn.execute(
+                            "INSERT OR IGNORE INTO markets (market_id, condition_id, asset, window, token_yes, token_no, open_ts, resolution_ts, open_price)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            rusqlite::params![
+                                wx_market_id,
+                                bm.condition_id,
+                                format!("WX-{}", event.city),
+                                format!("WX-{}-{}", event.city, event.target_date),
+                                bm.token_yes,
+                                bm.token_no,
+                                now_ts,
+                                end_ts,
+                                bm.midpoint,
+                            ],
+                        );
+
                         let p_ens = probs.get(i).copied();
                         let edge_val = p_ens.map(|p| p - bm.midpoint);
 
@@ -695,7 +721,7 @@ async fn run_weather(
                             bm.midpoint,
                             config.strategy.tau_min,
                             config.strategy.liquidity_b,
-                            config.strategy.kelly_fraction,
+                            (config.strategy.kelly_fraction * 2.0).min(1.0), // half-Kelly → full for ensemble
                             executor.bankroll(),
                             10_000.0, // weather volume placeholder
                             config.strategy.max_volume_pct,
@@ -710,6 +736,8 @@ async fn run_weather(
                                 event.city, event.target_date
                             ),
                             0.95, // max_fill_price: tail buckets are cheap
+                            0.001, // min_fill_price: Polymarket's tick size
+                            false, // direction_guard: multi-outcome, p_hat < 0.5 is normal
                         );
 
                         match result {
@@ -822,6 +850,14 @@ async fn run_weather(
                                 }
                             }
                             Err(nt) => {
+                                tracing::info!(
+                                    market = %nt.market_id,
+                                    reason = ?nt.reason,
+                                    edge = format_args!("{:.4}", nt.edge),
+                                    eff_edge = format_args!("{:.4}", nt.effective_edge),
+                                    fee = format_args!("{:.4}", nt.fee_rate),
+                                    "weather decide skip"
+                                );
                                 trades_skipped += 1;
                                 let _ = db_tx.try_send(DbEvent::Skip(nt));
                             }
@@ -839,6 +875,60 @@ async fn run_weather(
                     skips = trades_skipped,
                     "weather poll complete"
                 );
+
+                // ── Settlement: check if any open positions have resolved ──
+                let open_ids = executor.open_market_ids();
+                for mkt_id in &open_ids {
+                    let Some(cid) = wx_condition_ids.get(mkt_id) else {
+                        continue;
+                    };
+
+                    let url = format!("{}/markets/{cid}", clob_url);
+                    let resolved_side = match http.get(&url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.json::<crate::polymarket::types::ClobMarket>().await {
+                                Ok(cm) => {
+                                    crate::actors::market_fetcher::determine_outcome_from_clob(&cm)
+                                }
+                                Err(_) => None,
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(side) = resolved_side {
+                        let now = now_micros();
+                        let _ = db_tx.try_send(DbEvent::ClearOpenPositions {
+                            market_id: mkt_id.clone(),
+                        });
+                        let _ = db_tx.try_send(DbEvent::MarketResolution {
+                            market_id: mkt_id.clone(),
+                            resolved_side: side.to_string(),
+                        });
+                        let results = executor.settle(mkt_id, side, now);
+                        for tr in &results {
+                            match tr.outcome {
+                                crate::types::Outcome::Win => wins += 1,
+                                crate::types::Outcome::Loss => losses += 1,
+                            }
+                            total_pnl += tr.pnl;
+                            tracing::info!(
+                                market = %tr.market_id,
+                                outcome = %tr.outcome,
+                                pnl = format_args!("{:+.2}", tr.pnl),
+                                bankroll = format_args!("${:.2}", tr.bankroll_after),
+                                "weather settled"
+                            );
+                            let _ = db_tx.try_send(DbEvent::Trade(tr.clone()));
+                            if let Some(ref tg) = telegram_tx {
+                                let _ = tg.try_send(TelegramAlert::TradeSettled(tr.clone()));
+                            }
+                        }
+                    }
+
+                    // Small delay between CLOB lookups
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
             }
 
             _ = tokio::signal::ctrl_c() => {

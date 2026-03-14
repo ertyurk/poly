@@ -658,7 +658,7 @@ fn extract_dollar_amounts(text: &str) -> Vec<f64> {
 }
 
 /// Determine which side won using the CLOB API's authoritative `winner` flag.
-fn determine_outcome_from_clob(cm: &crate::polymarket::types::ClobMarket) -> Option<Side> {
+pub fn determine_outcome_from_clob(cm: &crate::polymarket::types::ClobMarket) -> Option<Side> {
     let tokens = cm.tokens.as_ref()?;
     for t in tokens {
         if t.winner == Some(true) {

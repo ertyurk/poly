@@ -61,17 +61,12 @@ impl Bucket {
             // Upper tail: "80 or higher"
             let val: f64 = rest.trim().parse().ok()?;
             (Some(val), None)
-        } else if body.contains('-') {
-            // Bounded range: "74-75"
-            let mut parts = body.split('-');
-            // Handle possible negative numbers: if body starts with '-', the
-            // first split element will be "" (empty). We need to be careful.
-            let lo_str = parts.next()?.trim();
-            let hi_str = parts.next()?.trim();
-            // Make sure there's no third piece (which would mean an unexpected format).
-            if parts.next().is_some() {
-                return None;
-            }
+        } else if body.len() > 1 && body[1..].contains('-') {
+            // Bounded range: "74-75" or "-5--4"
+            // We skip position 0 to avoid treating a negative sign as a range separator.
+            let dash_pos = body[1..].find('-').unwrap() + 1;
+            let lo_str = body[..dash_pos].trim();
+            let hi_str = body[dash_pos + 1..].trim();
             let lo_val: f64 = lo_str.parse().ok()?;
             let hi_val: f64 = hi_str.parse().ok()?;
             (Some(lo_val), Some(hi_val))
@@ -128,7 +123,7 @@ pub struct CityConfig {
     pub icao: &'static str,
 }
 
-static CITIES: [CityConfig; 20] = [
+pub static CITIES: [CityConfig; 20] = [
     // Fahrenheit cities
     CityConfig { name: "atlanta", lat: 33.749, lon: -84.388, temp_unit: TempUnit::Fahrenheit, icao: "KATL" },
     CityConfig { name: "chicago", lat: 41.878, lon: -87.630, temp_unit: TempUnit::Fahrenheit, icao: "KORD" },

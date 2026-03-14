@@ -192,6 +192,11 @@ impl Executor {
         self.bankroll
     }
 
+    /// Return market IDs for all open positions.
+    pub fn open_market_ids(&self) -> Vec<String> {
+        self.positions.iter().map(|p| p.market_id.clone()).collect()
+    }
+
     /// Register token IDs for a market so the executor knows which token to trade.
     pub fn register_market(
         &mut self,

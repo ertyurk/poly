@@ -57,6 +57,22 @@ fn parse_celsius_upper_tail() {
 }
 
 #[test]
+fn parse_negative_celsius_single() {
+    let b = Bucket::parse("-3°C").unwrap();
+    assert_eq!(b.lo, Some(-3.0));
+    assert_eq!(b.hi, Some(-3.0));
+    assert_eq!(b.unit, TempUnit::Celsius);
+}
+
+#[test]
+fn parse_negative_celsius_lower_tail() {
+    let b = Bucket::parse("-4°C or below").unwrap();
+    assert_eq!(b.lo, None);
+    assert_eq!(b.hi, Some(-4.0));
+    assert_eq!(b.unit, TempUnit::Celsius);
+}
+
+#[test]
 fn parse_invalid_returns_none() {
     assert!(Bucket::parse("garbage").is_none());
     assert!(Bucket::parse("").is_none());

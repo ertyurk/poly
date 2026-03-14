@@ -75,6 +75,8 @@ pub fn decide(
     best_ask: f64,
     event_slug: &str,
     max_fill_price: f64,
+    min_fill_price: f64,
+    direction_guard: bool,
 ) -> Result<TradeDecision, NoTrade> {
     let ts = now_micros();
 
@@ -121,7 +123,7 @@ pub fn decide(
     // max_fill_price is regime-dependent:
     //   Standard regime: 0.50 (R/R ≥ 1.0)
     //   Convergence regime: 0.95 (near-deterministic outcome, fees ~0)
-    if fill_price < 0.05 || fill_price > max_fill_price {
+    if fill_price < min_fill_price || fill_price > max_fill_price {
         return Err(no_trade(
             p_hat - p_market,
             SkipReason::InsufficientEdge,
@@ -134,13 +136,16 @@ pub fn decide(
     // If p_hat < 0.5 (model says NO likely) → only allow NO bets.
     // This prevents contrarian bets where the market has already priced in
     // the displacement and we'd be betting against our own signal.
-    let model_favors_yes = p_hat > 0.5;
-    if (model_favors_yes && side == Side::No) || (!model_favors_yes && side == Side::Yes) {
-        return Err(no_trade(
-            p_hat - p_market,
-            SkipReason::InsufficientEdge,
-            0.0,
-        ));
+    // Disabled for multi-outcome markets (weather) where p_hat < 0.5 is normal.
+    if direction_guard {
+        let model_favors_yes = p_hat > 0.5;
+        if (model_favors_yes && side == Side::No) || (!model_favors_yes && side == Side::Yes) {
+            return Err(no_trade(
+                p_hat - p_market,
+                SkipReason::InsufficientEdge,
+                0.0,
+            ));
+        }
     }
 
     // 5. Compute edge against actual fill price.
@@ -379,6 +384,19 @@ impl DecisionActor {
                         continue;
                     }
 
+                    // Displacement direction must match signal direction.
+                    // If price is above open (UP), only allow YES bets.
+                    // If price is below open (DOWN), only allow NO bets.
+                    // Prevents betting against the scoreboard when stale drift
+                    // overwhelms the actual displacement.
+                    let price_above_open = sig.displacement_pct > 0.0;
+                    if price_above_open && !signal_yes {
+                        continue;
+                    }
+                    if !price_above_open && signal_yes {
+                        continue;
+                    }
+
                     // Determine trade direction for directional OFI/cross-asset
                     let signal_says_up = sig.p_hat > 0.5;
                     let direction = if signal_says_up { 1.0 } else { -1.0 };
@@ -431,6 +449,8 @@ impl DecisionActor {
                         ms.best_ask,
                         &ms.event_slug,
                         max_fill_price,
+                        0.05, // min_fill_price: crypto markets
+                        true, // direction_guard: binary crypto markets
                     );
 
                     let output = match &result {

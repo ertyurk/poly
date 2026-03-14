@@ -5,12 +5,7 @@ use crate::weather::types::{Bucket, CityConfig, TempUnit};
 /// Appends `&temperature_unit=fahrenheit` only for Fahrenheit cities.
 pub fn build_open_meteo_url(city: &CityConfig, date: &str) -> String {
     let base = format!(
-        "https://ensemble-api.open-meteo.com/v1/ensemble\
-         ?latitude={lat}&longitude={lon}\
-         &daily=temperature_2m_max\
-         &models=ecmwf_ifs025,gfs025_ensemble\
-         &start_date={date}&end_date={date}\
-         &timezone=auto",
+        "https://ensemble-api.open-meteo.com/v1/ensemble?latitude={lat}&longitude={lon}&daily=temperature_2m_max&models=ecmwf_ifs025,gfs025&start_date={date}&end_date={date}&timezone=auto",
         lat = city.lat,
         lon = city.lon,
     );
@@ -33,11 +28,17 @@ pub fn parse_ensemble_temps(json: &serde_json::Value) -> Option<Vec<f64>> {
 
     let mut temps = Vec::new();
 
-    for member in 1..=99u8 {
-        let key = format!("temperature_2m_max_member{member:02}");
-        if let Some(arr) = obj.get(&key).and_then(|v| v.as_array()) {
-            if let Some(val) = arr.first().and_then(serde_json::Value::as_f64) {
-                temps.push(val);
+    // When querying multiple models, Open-Meteo appends model suffixes:
+    //   temperature_2m_max_member01_ecmwf_ifs025_ensemble
+    //   temperature_2m_max_member01_ncep_gefs025
+    // With a single model it's just: temperature_2m_max_member01
+    // Match any key that starts with "temperature_2m_max_member".
+    for (key, val) in obj.iter() {
+        if key.starts_with("temperature_2m_max_member") {
+            if let Some(arr) = val.as_array() {
+                if let Some(temp) = arr.first().and_then(serde_json::Value::as_f64) {
+                    temps.push(temp);
+                }
             }
         }
     }
@@ -72,7 +73,14 @@ pub async fn fetch_ensemble(
 ) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
     let url = build_open_meteo_url(city, date);
     let resp = http.get(&url).send().await?;
-    let json: serde_json::Value = resp.json().await?;
+    let text = resp.text().await?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        format!("JSON parse error for {}: {} — body: {}", city.name, e, &text[..text.len().min(200)])
+    })?;
     parse_ensemble_temps(&json)
-        .ok_or_else(|| "no ensemble members found in Open-Meteo response".into())
+        .ok_or_else(|| {
+            let keys: Vec<_> = json.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+            let daily_keys: Vec<_> = json.get("daily").and_then(|d| d.as_object()).map(|o| o.keys().cloned().collect()).unwrap_or_default();
+            format!("no ensemble members: top_keys={keys:?} daily_keys={daily_keys:?}").into()
+        })
 }

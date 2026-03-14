@@ -16,7 +16,7 @@ fn url_fahrenheit_includes_temp_unit() {
     assert!(url.contains("start_date=2026-03-15"));
     assert!(url.contains("end_date=2026-03-15"));
     assert!(url.contains("&temperature_unit=fahrenheit"));
-    assert!(url.contains("models=ecmwf_ifs025,gfs025_ensemble"));
+    assert!(url.contains("models=ecmwf_ifs025,gfs025"));
 }
 
 #[test]
