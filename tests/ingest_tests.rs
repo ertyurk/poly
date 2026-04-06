@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use polymarket_bot::actors::ingest::parse_binance_tick;
 use polymarket_bot::types::Asset;
 

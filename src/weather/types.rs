@@ -64,7 +64,7 @@ impl Bucket {
         } else if body.len() > 1 && body[1..].contains('-') {
             // Bounded range: "74-75" or "-5--4"
             // We skip position 0 to avoid treating a negative sign as a range separator.
-            let dash_pos = body[1..].find('-').unwrap() + 1;
+            let dash_pos = body[1..].find('-')? + 1;
             let lo_str = body[..dash_pos].trim();
             let hi_str = body[dash_pos + 1..].trim();
             let lo_val: f64 = lo_str.parse().ok()?;

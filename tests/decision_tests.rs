@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use polymarket_bot::actors::decision::*;
 use polymarket_bot::actors::signal::AssetTracker;
 use polymarket_bot::types::*;

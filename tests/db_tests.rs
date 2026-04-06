@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use polymarket_bot::db;
 use polymarket_bot::types::*;
 use tempfile::NamedTempFile;

@@ -146,9 +146,9 @@ batch_size = 100
 flush_interval_ms = 500
 
 [telegram]
-bot_token = "YOUR_BOT_TOKEN"
-chat_id = "YOUR_CHAT_ID"
-enabled = true
+bot_token = ""
+chat_id = ""
+enabled = false
 summary_interval_mins = 15
 
 [execution]
