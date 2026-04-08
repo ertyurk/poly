@@ -48,7 +48,7 @@ impl MarketFetcher {
             asset_filter,
             window_filter,
             poll_interval: Duration::from_secs(poll_interval_secs),
-            book_refresh: Duration::from_secs(5),
+            book_refresh: Duration::from_secs(3),
             max_spread,
         }
     }
@@ -478,7 +478,7 @@ fn detect_asset(gm: &crate::polymarket::types::GammaMarket) -> Option<Asset> {
         let lower = s.to_lowercase();
         if lower.contains("btc") || lower.contains("bitcoin") {
             Some(Asset::BTC)
-        } else if lower.contains("ethereum") {
+        } else if lower.contains("ethereum") || lower.contains("eth") {
             Some(Asset::ETH)
         } else {
             None

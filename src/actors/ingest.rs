@@ -6,7 +6,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::config::Config;
 use crate::types::*;
 
-const MAX_RETRIES: u32 = 5;
+/// Maximum backoff between reconnection attempts (60 seconds).
+const MAX_BACKOFF_SECS: u64 = 60;
 
 #[derive(Debug, serde::Deserialize)]
 struct BinanceTrade {
@@ -102,13 +103,16 @@ impl IngestActor {
                 }
                 Err(e) => {
                     retry_count += 1;
-                    if retry_count > MAX_RETRIES {
-                        tracing::error!("Binance WS: max retries exceeded");
-                        return;
-                    }
-                    let backoff = std::time::Duration::from_secs(2u64.pow(retry_count));
-                    tracing::warn!(error = %e, retry = retry_count, "Binance WS connection failed, retrying");
-                    tokio::time::sleep(backoff).await;
+                    let backoff_secs =
+                        2u64.pow(retry_count.min(6)).min(MAX_BACKOFF_SECS);
+                    tracing::warn!(
+                        error = %e,
+                        retry = retry_count,
+                        backoff_secs,
+                        "Binance WS connection failed, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs))
+                        .await;
                 }
             }
         }

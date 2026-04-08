@@ -1166,6 +1166,7 @@ async fn run_crypto(
         config.strategy.adapt.clone(),
         config.strategy.midpoint_ema_tau_secs,
         config.strategy.min_displacement_pct,
+        config.strategy.max_fill_price,
     );
     tokio::spawn(async move {
         decision_actor.run().await;

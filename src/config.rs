@@ -60,6 +60,12 @@ pub struct Strategy {
     /// Filters out noise moves. 0.15 = 0.15% (~$120 on $80K BTC).
     #[serde(default = "default_min_displacement_pct")]
     pub min_displacement_pct: f64,
+    /// Maximum fill price per share (risk cap).
+    /// 0.50 = R/R ≥ 1:1, 0.60 = R/R ≥ 0.67:1.
+    /// Applies to both YES (best_ask) and NO (1-best_bid) fills.
+    /// Raise above 0.50 to allow NO bets in bearish-leaning markets.
+    #[serde(default = "default_max_fill_price")]
+    pub max_fill_price: f64,
     /// EMA smoothing time constant (seconds) for the market agreement midpoint filter.
     /// Prevents brief order-book flash crashes from bypassing the filter.
     /// Half-life ≈ tau * ln(2). Default 45s → half-life ≈ 31s.
@@ -278,6 +284,10 @@ const fn default_max_tail_price() -> f64 {
 }
 const fn default_tail_buckets() -> u8 {
     3
+}
+
+fn default_max_fill_price() -> f64 {
+    0.60
 }
 
 fn default_min_displacement_pct() -> f64 {

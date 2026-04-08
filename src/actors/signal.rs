@@ -37,12 +37,12 @@ const VOL_SAFETY_MARGIN: f64 = 1.0;
 const SLOW_VOL_FACTOR: f64 = 6.0;
 
 /// Slow drift lambda divisor: slow_lambda = spot_lambda / SLOW_DRIFT_FACTOR.
-/// Factor of 4 → slow drift half-life is 4× longer than fast drift.
+/// Factor of 2 → slow drift half-life is 2× longer than fast drift.
 /// Fast (spot_lambda=0.00230): half-life ≈ 5 min.
-/// Slow (spot_lambda/4):       half-life ≈ 20 min.
+/// Slow (spot_lambda/2):       half-life ≈ 10 min.
 /// Requires both timescales to agree before trading — prevents
 /// short-term bounces from triggering bets against the prevailing trend.
-const SLOW_DRIFT_FACTOR: f64 = 4.0;
+const SLOW_DRIFT_FACTOR: f64 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Fat-tailed probability model (Student-t adjusted log-normal)
@@ -87,7 +87,8 @@ fn compute_p_hat_lognormal(
         return 0.5;
     }
 
-    let drift_t = drift_per_sec * time_to_expiry_secs;
+    let drift_t =
+        (drift_per_sec - 0.5 * vol_per_sec * vol_per_sec) * time_to_expiry_secs;
 
     match market_type {
         MarketType::Above(strike) => {
@@ -496,7 +497,13 @@ impl SignalActor {
                         };
                         let flow_override = ofi_agrees && flow_snap.vol_ratio > 1.5;
 
-                        if !fast_agrees || (!slow_agrees && !flow_override) {
+                        // Extreme conviction override: skip slow drift for
+                        // very strong signals where waiting costs the edge.
+                        let extreme_signal = p_hat < 0.15 || p_hat > 0.85;
+
+                        if !fast_agrees
+                            || (!slow_agrees && !flow_override && !extreme_signal)
+                        {
                             tracing::debug!(
                                 market = %market_id,
                                 p_hat = format_args!("{p_hat:.4}"),

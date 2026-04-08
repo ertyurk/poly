@@ -126,7 +126,7 @@ pub fn decide(
     if fill_price < min_fill_price || fill_price > max_fill_price {
         return Err(no_trade(
             p_hat - p_market,
-            SkipReason::InsufficientEdge,
+            SkipReason::PriceOutOfRange,
             0.0,
         ));
     }
@@ -142,7 +142,7 @@ pub fn decide(
         if (model_favors_yes && side == Side::No) || (!model_favors_yes && side == Side::Yes) {
             return Err(no_trade(
                 p_hat - p_market,
-                SkipReason::InsufficientEdge,
+                SkipReason::DirectionGuard,
                 0.0,
             ));
         }
@@ -255,6 +255,7 @@ pub struct DecisionActor {
     adapt: crate::config::Adapt,
     midpoint_ema_tau: f64,
     min_displacement_pct: f64,
+    max_fill_price: f64,
 }
 
 impl DecisionActor {
@@ -271,6 +272,7 @@ impl DecisionActor {
         adapt: crate::config::Adapt,
         midpoint_ema_tau: f64,
         min_displacement_pct: f64,
+        max_fill_price: f64,
     ) -> Self {
         Self {
             rx,
@@ -287,6 +289,7 @@ impl DecisionActor {
             adapt,
             midpoint_ema_tau,
             min_displacement_pct,
+            max_fill_price,
         }
     }
 
@@ -339,14 +342,12 @@ impl DecisionActor {
                     // Too early: <35% elapsed → trend not established.
                     // For 5m markets, 35% = 1.75 min elapsed, 3.25 min remaining.
                     // For 15m markets, 35% = 5.25 min elapsed, 9.75 min remaining.
-                    if sig.elapsed_pct < 0.35 {
+                    if sig.elapsed_pct < 0.25 {
                         continue;
                     }
 
                     // --- Standard regime only ---
-                    // max_fill_price=0.50 ensures R/R ≥ 1:1 on every trade.
-                    // Win: ≥$0.50/share, Lose: ≤$0.50/share → break-even at 50%.
-                    let max_fill_price = 0.50_f64;
+                    let max_fill_price = self.max_fill_price;
                     let min_p_yes = 0.75_f64;
                     let max_p_no = 0.30_f64;
                     let effective_kelly = self.kelly_fraction;
@@ -368,12 +369,12 @@ impl DecisionActor {
                         .get(&sig.market_id)
                         .map(|e| e.0)
                         .unwrap_or(ms.midpoint);
-                    if signal_yes && ema_mid < 0.40 {
-                        // Market strongly says NO (60%+ conviction) — don't bet YES
+                    if signal_yes && ema_mid < 0.25 {
+                        // Market strongly says NO (75%+ conviction) — don't bet YES
                         continue;
                     }
-                    if !signal_yes && ema_mid > 0.60 {
-                        // Market strongly says YES (60%+ conviction) — don't bet NO
+                    if !signal_yes && ema_mid > 0.75 {
+                        // Market strongly says YES (75%+ conviction) — don't bet NO
                         continue;
                     }
 

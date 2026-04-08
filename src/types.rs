@@ -104,6 +104,8 @@ pub enum SkipReason {
     InsufficientEdge,
     FeeTooHigh,
     LowConfidence,
+    DirectionGuard,
+    PriceOutOfRange,
 }
 
 impl fmt::Display for SkipReason {
@@ -112,6 +114,8 @@ impl fmt::Display for SkipReason {
             Self::InsufficientEdge => f.write_str("INSUFFICIENT_EDGE"),
             Self::FeeTooHigh => f.write_str("FEE_TOO_HIGH"),
             Self::LowConfidence => f.write_str("LOW_CONFIDENCE"),
+            Self::DirectionGuard => f.write_str("DIRECTION_GUARD"),
+            Self::PriceOutOfRange => f.write_str("PRICE_OUT_OF_RANGE"),
         }
     }
 }

@@ -276,7 +276,7 @@ impl Executor {
 
         let mut fill_price = match dec.side {
             Side::Yes => best_ask,
-            Side::No => ((1.0 - best_bid) * 100.0).round() / 100.0,
+            Side::No => ((1.0 - best_ask) * 100.0).round() / 100.0,
         };
 
         // Reject if price slipped beyond tolerance
@@ -472,7 +472,7 @@ impl Executor {
         &mut self,
         dec: &TradeDecision,
         best_ask: f64,
-        best_bid: f64,
+        _best_bid: f64,
         gtd_expiry_secs: u64,
         resolution_ts: TsMicros,
         min_time_before_resolution_secs: u64,
@@ -533,11 +533,11 @@ impl Executor {
             return Err("exposure_limit".to_string());
         }
 
-        // Compute fill price: YES uses best_ask, NO uses complement of best_bid
+        // Compute fill price: YES uses best_ask, NO uses complement of best_ask
         // Apply gtd_price_bump to cross the spread slightly for faster fills.
         let fill_price = match dec.side {
             Side::Yes => ((best_ask + gtd_price_bump) * 100.0).round() / 100.0,
-            Side::No => (((1.0 - best_bid) + gtd_price_bump) * 100.0).round() / 100.0,
+            Side::No => (((1.0 - best_ask) + gtd_price_bump) * 100.0).round() / 100.0,
         }
         .min(0.95);
 
