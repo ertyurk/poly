@@ -80,7 +80,7 @@ impl MarketFetcher {
                 "1d" => Window::Daily,
                 _ => continue,
             };
-            tracing::info!(
+            tracing::debug!(
                 market = %rm.market_id,
                 condition_id = %rm.condition_id,
                 "seeded tracked market from restored position"
@@ -127,7 +127,7 @@ impl MarketFetcher {
                 biased;
 
                 _ = shutdown.changed() => {
-                    tracing::info!("market fetcher shutting down");
+                    tracing::debug!("market fetcher shutting down");
                     return;
                 }
 
@@ -265,14 +265,18 @@ impl MarketFetcher {
 
             let market_type = parse_market_type(question);
 
-            // Only trade UpDown markets — our signal model is tuned for directional bets.
-            // "Above $X" / "Between" markets need a different edge source.
-            if !matches!(market_type, MarketType::UpDown) {
-                continue;
-            }
+            // Accept UpDown + Above/Below/Between markets.
+            // Signal model handles all variants via compute_p_hat_lognormal.
 
-            // Skip UpDown markets resolving > 5 hours out (focus on 5m/15m/1h/4h)
-            if secs_until > 5 * 3600 {
+            // Time horizon limits by market type:
+            // UpDown: ≤5h (5m/15m/1h windows)
+            // Strike markets: ≤48h (daily resolution)
+            let max_secs = if matches!(market_type, MarketType::UpDown) {
+                5 * 3600
+            } else {
+                48 * 3600
+            };
+            if secs_until > max_secs {
                 continue;
             }
 
@@ -343,7 +347,7 @@ impl MarketFetcher {
                 },
             );
 
-            tracing::info!(
+            tracing::debug!(
                 market = %market_id,
                 question = gm.question.as_deref().unwrap_or("?"),
                 midpoint = book.midpoint,
@@ -426,7 +430,7 @@ impl MarketFetcher {
                         side
                     } else {
                         // Market exists but no winner yet — retry next cycle
-                        tracing::info!(
+                        tracing::debug!(
                             condition_id = %cid,
                             "no winner flag set yet, deferring settlement"
                         );
@@ -434,7 +438,7 @@ impl MarketFetcher {
                     }
                 }
                 Ok(None) => {
-                    tracing::info!(condition_id = %cid, "CLOB market not found for resolution");
+                    tracing::debug!(condition_id = %cid, "CLOB market not found for resolution");
                     continue;
                 }
                 Err(e) => {

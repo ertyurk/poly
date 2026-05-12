@@ -13,7 +13,7 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "ALTER TABLE trades ADD COLUMN estimated_slippage REAL NOT NULL DEFAULT 0.0;",
         )?;
-        tracing::info!("migrated: added trades.estimated_slippage");
+        tracing::debug!("migrated: added trades.estimated_slippage");
     }
 
     // Migration: add slow_drift column to signal_state (PR #1 fix)
@@ -21,7 +21,7 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "ALTER TABLE signal_state ADD COLUMN slow_drift REAL NOT NULL DEFAULT 0.0;",
         )?;
-        tracing::info!("migrated: added signal_state.slow_drift");
+        tracing::debug!("migrated: added signal_state.slow_drift");
     }
 
     // Migration: add slow_variance column to signal_state
@@ -33,7 +33,7 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "UPDATE signal_state SET slow_variance = variance WHERE slow_variance = 0.0;",
         )?;
-        tracing::info!("migrated: added signal_state.slow_variance");
+        tracing::debug!("migrated: added signal_state.slow_variance");
     }
 
     // Migration: create open_positions table
@@ -56,7 +56,7 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "ALTER TABLE markets ADD COLUMN condition_id TEXT NOT NULL DEFAULT '';",
         )?;
-        tracing::info!("migrated: added markets.condition_id");
+        tracing::debug!("migrated: added markets.condition_id");
     }
 
     // Migration: create fill_rejections table
@@ -110,6 +110,15 @@ fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_wm_city_date
             ON weather_markets(city, target_date);",
     )?;
+
+    // Migration: add vol_regime and variance_ratio to signals
+    if !column_exists(conn, "signals", "vol_regime")? {
+        conn.execute_batch(
+            "ALTER TABLE signals ADD COLUMN vol_regime REAL;
+             ALTER TABLE signals ADD COLUMN variance_ratio REAL;",
+        )?;
+        tracing::debug!("migrated: added signals.vol_regime, variance_ratio");
+    }
 
     Ok(())
 }

@@ -42,6 +42,18 @@ pub struct Bankroll {
 pub struct Strategy {
     pub tau_min: f64,
     pub kelly_fraction: f64,
+    /// Kelly fraction for NO trades (more conservative than YES).
+    #[serde(default = "default_kelly_fraction_no")]
+    pub kelly_fraction_no: f64,
+    /// Vol regime minimum: fast_vol/slow_vol < this = quiet market, skip.
+    #[serde(default = "default_vol_regime_min")]
+    pub vol_regime_min: f64,
+    /// Vol regime maximum: fast_vol/slow_vol > this = chaotic market, skip.
+    #[serde(default = "default_vol_regime_max")]
+    pub vol_regime_max: f64,
+    /// Variance ratio threshold: VR < this for NO trades = mean-reverting, skip.
+    #[serde(default = "default_vr_block_threshold")]
+    pub vr_block_threshold: f64,
     pub max_volume_pct: f64,
     pub min_confidence: f64,
     pub liquidity_b: f64,
@@ -288,6 +300,22 @@ const fn default_tail_buckets() -> u8 {
 
 fn default_max_fill_price() -> f64 {
     0.60
+}
+
+fn default_kelly_fraction_no() -> f64 {
+    0.15
+}
+
+fn default_vol_regime_min() -> f64 {
+    0.5
+}
+
+fn default_vol_regime_max() -> f64 {
+    5.0
+}
+
+fn default_vr_block_threshold() -> f64 {
+    0.85
 }
 
 fn default_min_displacement_pct() -> f64 {

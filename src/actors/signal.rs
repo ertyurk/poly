@@ -146,6 +146,8 @@ pub struct AssetTracker {
     slow_drift: f64,
     lambda: f64,
     slow_lambda: f64,
+    /// Circular buffer of recent log returns for variance ratio test.
+    return_buf: std::collections::VecDeque<f64>,
 }
 
 impl AssetTracker {
@@ -162,6 +164,7 @@ impl AssetTracker {
             slow_drift: 0.0,
             lambda,
             slow_lambda,
+            return_buf: std::collections::VecDeque::with_capacity(64),
         }
     }
 
@@ -200,6 +203,12 @@ impl AssetTracker {
             self.slow_variance =
                 (1.0 - slow_vol_alpha) * self.slow_variance + slow_vol_alpha * var_sample;
 
+            // Store log return for variance ratio test
+            self.return_buf.push_back(log_ret);
+            if self.return_buf.len() > 64 {
+                self.return_buf.pop_front();
+            }
+
             self.last_price = price;
             self.last_ts = ts;
             self.valid_ticks += 1;
@@ -230,6 +239,37 @@ impl AssetTracker {
         let fast = self.variance.sqrt().max(MIN_VOL);
         let slow = self.slow_variance.sqrt().max(MIN_VOL);
         fast / slow
+    }
+
+    /// Variance ratio VR(q): Var(q-period) / (q * Var(1-period)).
+    /// VR < 1.0 = mean-reverting, VR > 1.0 = trending.
+    fn variance_ratio(&self, q: usize) -> Option<f64> {
+        let n = self.return_buf.len();
+        if n < q * 2 {
+            return None;
+        }
+        let buf: &std::collections::VecDeque<f64> = &self.return_buf;
+        // Var of 1-period returns
+        let mean: f64 = buf.iter().sum::<f64>() / n as f64;
+        let var1: f64 =
+            buf.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+        if var1 < 1e-20 {
+            return None;
+        }
+        // Var of q-period returns (sum of q consecutive 1-period returns)
+        let num_q = n - q + 1;
+        let mut q_returns = Vec::with_capacity(num_q);
+        for i in 0..num_q {
+            let s: f64 = (0..q).map(|j| buf[i + j]).sum();
+            q_returns.push(s);
+        }
+        let q_mean: f64 = q_returns.iter().sum::<f64>() / num_q as f64;
+        let var_q: f64 = q_returns
+            .iter()
+            .map(|r| (r - q_mean).powi(2))
+            .sum::<f64>()
+            / (num_q - 1).max(1) as f64;
+        Some(var_q / (q as f64 * var1))
     }
 
     fn current_price(&self) -> f64 {
@@ -263,6 +303,7 @@ impl AssetTracker {
             slow_drift: 0.0,
             lambda,
             slow_lambda,
+            return_buf: std::collections::VecDeque::with_capacity(64),
         }
     }
 
@@ -330,7 +371,7 @@ impl SignalActor {
             self.initial_trackers.drain().collect();
         for (asset, tracker) in &asset_trackers {
             let vol = tracker.vol_per_sec();
-            tracing::info!(
+            tracing::debug!(
                 asset = %asset,
                 valid_ticks = tracker.state_for_persist().2,
                 vol = vol,
@@ -352,7 +393,7 @@ impl SignalActor {
                 biased;
 
                 _ = shutdown.changed() => {
-                    tracing::info!("signal actor shutting down — persisting state");
+                    tracing::debug!("signal actor shutting down — persisting state");
                     for (asset, tracker) in &asset_trackers {
                         let (last_price, last_ts, valid_ticks, variance, drift, slow_drift, lam, slow_var) =
                             tracker.state_for_persist();
@@ -414,6 +455,7 @@ impl SignalActor {
                     let slow_drift = tracker.slow_drift_per_sec();
                     let n_obs = tracker.state_for_persist().2;
                     let vol_regime = tracker.vol_regime();
+                    let vr = tracker.variance_ratio(16);
 
                     // Get flow snapshot (release mutable borrow on flow_trackers)
                     let flow_snap = if let Some(ft) = flow_trackers.get(&tick.asset) {
@@ -446,20 +488,40 @@ impl SignalActor {
                             .or_insert(tick.price);
 
                         // Only emit signals after enough of the window has elapsed.
-                        // Trading later = more data = higher accuracy.
+                        // UpDown (short window): 20% elapsed for momentum accuracy.
+                        // Strike (daily): 5% — signal is valid once warmup completes,
+                        // and waiting 20% of a 24h window (4.8h) wastes edge.
                         let total_duration =
                             (meta.resolution_ts - meta.open_ts) as f64;
                         let elapsed_us =
                             (tick.ts - meta.open_ts) as f64;
+                        let min_elapsed = if matches!(
+                            meta.market_type,
+                            MarketType::UpDown
+                        ) {
+                            MIN_ELAPSED_PCT
+                        } else {
+                            0.05
+                        };
                         if total_duration > 0.0
-                            && (elapsed_us / total_duration) < MIN_ELAPSED_PCT
+                            && (elapsed_us / total_duration) < min_elapsed
                         {
                             continue;
                         }
 
-                        // Throttle: 1 signal/sec/market
+                        // Throttle: 1 signal/sec for UpDown, 1/30sec for strike.
+                        // Strike markets change slowly — no need to flood the
+                        // decision actor with 1/sec for 24h markets.
+                        let throttle_us = if matches!(
+                            meta.market_type,
+                            MarketType::UpDown
+                        ) {
+                            1_000_000 // 1 second
+                        } else {
+                            30_000_000 // 30 seconds
+                        };
                         let prev = last_signal_ts.get(market_id).copied().unwrap_or(0);
-                        if (tick.ts - prev) < 1_000_000 {
+                        if (tick.ts - prev) < throttle_us {
                             continue;
                         }
                         last_signal_ts.insert(market_id.clone(), tick.ts);
@@ -566,6 +628,7 @@ impl SignalActor {
                             cross_asset_signal,
                             elapsed_pct,
                             displacement_pct,
+                            variance_ratio: vr,
                         };
 
                         tracing::debug!(
@@ -578,7 +641,9 @@ impl SignalActor {
                             "signal emitted"
                         );
                         let _ = db_tx.try_send(DbEvent::Signal(sig.clone()));
-                        let _ = signal_tx.try_send(sig);
+                        if let Err(e) = signal_tx.try_send(sig) {
+                            tracing::warn!("signal channel full/closed: {e}");
+                        }
                     }
                 }
             }

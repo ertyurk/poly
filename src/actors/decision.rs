@@ -245,6 +245,9 @@ pub struct DecisionActor {
     midpoint_ema: std::collections::HashMap<String, (f64, i64)>,
     /// Markets with pending (unfilled or open) positions — suppress duplicate decisions.
     pending: std::collections::HashSet<String>,
+    /// Consecutive signal direction tracker: (is_yes, streak_count).
+    /// Requires 3+ consecutive signals agreeing before allowing a trade.
+    signal_streak: std::collections::HashMap<String, (bool, u32)>,
     /// Configuration
     tau_min: f64,
     b: f64,
@@ -256,6 +259,10 @@ pub struct DecisionActor {
     midpoint_ema_tau: f64,
     min_displacement_pct: f64,
     max_fill_price: f64,
+    kelly_fraction_no: f64,
+    vol_regime_min: f64,
+    vol_regime_max: f64,
+    vr_block_threshold: f64,
 }
 
 impl DecisionActor {
@@ -273,6 +280,10 @@ impl DecisionActor {
         midpoint_ema_tau: f64,
         min_displacement_pct: f64,
         max_fill_price: f64,
+        kelly_fraction_no: f64,
+        vol_regime_min: f64,
+        vol_regime_max: f64,
+        vr_block_threshold: f64,
     ) -> Self {
         Self {
             rx,
@@ -280,6 +291,7 @@ impl DecisionActor {
             markets: std::collections::HashMap::new(),
             midpoint_ema: std::collections::HashMap::new(),
             pending: std::collections::HashSet::new(),
+            signal_streak: std::collections::HashMap::new(),
             tau_min,
             b,
             kelly_fraction,
@@ -290,6 +302,10 @@ impl DecisionActor {
             midpoint_ema_tau,
             min_displacement_pct,
             max_fill_price,
+            kelly_fraction_no,
+            vol_regime_min,
+            vol_regime_max,
+            vr_block_threshold,
         }
     }
 
@@ -318,11 +334,24 @@ impl DecisionActor {
                     self.pending.remove(&market_id);
                 }
                 DecisionInput::Signal(sig) => {
+                    if sig.market_id.contains("_1d_") {
+                        tracing::info!(
+                            market = %sig.market_id,
+                            p_hat = format_args!("{:.3}", sig.p_hat),
+                            "decision actor received 1d signal"
+                        );
+                    }
                     // Skip if we already have a pending position on this market.
                     if self.pending.contains(&sig.market_id) {
                         continue;
                     }
                     let Some(ms) = self.markets.get(&sig.market_id) else {
+                        if sig.market_id.contains("_1d_") {
+                            tracing::warn!(
+                                market = %sig.market_id,
+                                "1d signal but no market state"
+                            );
+                        }
                         continue;
                     };
 
@@ -332,71 +361,152 @@ impl DecisionActor {
                     // mid-window (50-85% elapsed) entries win only 22%.
                     // =====================================================
 
-                    // Dead zone: ≥85% elapsed — reversals and thin liquidity.
-                    // Convergence regime disabled: proved unprofitable in live
-                    // (6 trades, net -$8.13, terrible R/R at high fill prices).
-                    if sig.elapsed_pct >= 0.85 {
+                    // Dead zone: ≥80% elapsed — reversals and thin liquidity.
+                    if sig.elapsed_pct >= 0.80 {
                         continue;
                     }
 
-                    // Too early: <35% elapsed → trend not established.
-                    // For 5m markets, 35% = 1.75 min elapsed, 3.25 min remaining.
-                    // For 15m markets, 35% = 5.25 min elapsed, 9.75 min remaining.
-                    if sig.elapsed_pct < 0.25 {
+                    // Elapsed gate: market-type dependent.
+                    // UpDown: 50-80% is the sweet spot (data: 67% win rate
+                    // at 60-75% elapsed vs 17% at <40%).
+                    // Strike markets: 5% — match signal actor gate.
+                    let is_updown_market =
+                        matches!(ms.market_type, MarketType::UpDown);
+                    let min_elapsed = if is_updown_market { 0.50 } else { 0.05 };
+                    if sig.elapsed_pct < min_elapsed {
                         continue;
                     }
 
-                    // --- Standard regime only ---
-                    let max_fill_price = self.max_fill_price;
-                    let min_p_yes = 0.75_f64;
+                    // Volatility regime filter (UpDown only).
+                    // Strike markets exempt: their edge comes from strike distance
+                    // vs vol surface, not from short-term vol regime.
+                    if is_updown_market {
+                        if sig.vol_regime < self.vol_regime_min {
+                            continue;
+                        }
+                        if sig.vol_regime > self.vol_regime_max {
+                            continue;
+                        }
+                    }
+
+                    // --- Common definitions ---
+                    let signal_yes = sig.p_hat > 0.5;
+                    let is_updown = matches!(ms.market_type, MarketType::UpDown);
+                    // UpDown: tight fill cap (coin-flip dynamics, need R/R).
+                    // Strike: higher cap — the model has genuine edge from
+                    // vol/drift estimation, so fills up to 0.85 are profitable
+                    // when p_hat > 0.90.
+                    let max_fill_price = if is_updown {
+                        self.max_fill_price
+                    } else {
+                        0.85
+                    };
+                    let effective_kelly = if signal_yes {
+                        self.kelly_fraction
+                    } else {
+                        self.kelly_fraction_no
+                    };
+
+                    // P_hat conviction filter: require extreme signal.
+                    let min_p_yes = 0.80_f64;
                     let max_p_no = 0.30_f64;
-                    let effective_kelly = self.kelly_fraction;
-
-                    // P_hat conviction filter: require extreme signal for each side.
                     if sig.p_hat > 0.5 && sig.p_hat < min_p_yes {
                         continue;
                     }
                     if sig.p_hat <= 0.5 && sig.p_hat > max_p_no {
                         continue;
                     }
+                    // Block extreme NO overreactions on UpDown markets.
+                    // Very extreme signals (< 0.10) are mostly noise dips.
+                    if is_updown && !signal_yes && sig.p_hat < 0.10 {
+                        continue;
+                    }
 
-                    // Market agreement: don't bet against strong market conviction.
-                    // Uses EMA-smoothed midpoint (tau=45s) to prevent brief
-                    // order-book flash crashes from bypassing the filter.
-                    let signal_yes = sig.p_hat > 0.5;
+                    // Market agreement: only block when market is extremely
+                    // convicted in the opposite direction.
                     let ema_mid = self
                         .midpoint_ema
                         .get(&sig.market_id)
                         .map(|e| e.0)
                         .unwrap_or(ms.midpoint);
                     if signal_yes && ema_mid < 0.25 {
-                        // Market strongly says NO (75%+ conviction) — don't bet YES
+                        if sig.market_id.contains("_1d_") {
+                            tracing::info!(market=%sig.market_id, ema_mid, "1d BLOCKED: mkt agree YES<0.25");
+                        }
                         continue;
                     }
                     if !signal_yes && ema_mid > 0.75 {
-                        // Market strongly says YES (75%+ conviction) — don't bet NO
+                        if sig.market_id.contains("_1d_") {
+                            tracing::info!(market=%sig.market_id, ema_mid, "1d BLOCKED: mkt agree NO>0.75");
+                        }
+                        continue;
+                    }
+
+                    // Signal streak: require consecutive same-direction signals.
+                    // YES needs 3 (higher reversal risk on UpDown markets).
+                    // NO needs 2 (momentum-aligned, faster reaction needed).
+                    let sig_is_yes = sig.p_hat > 0.5;
+                    let streak = self
+                        .signal_streak
+                        .entry(sig.market_id.clone())
+                        .or_insert((sig_is_yes, 0));
+                    if streak.0 == sig_is_yes {
+                        streak.1 += 1;
+                    } else {
+                        *streak = (sig_is_yes, 1);
+                    }
+                    let min_streak = if sig_is_yes { 3 } else { 2 };
+                    if streak.1 < min_streak {
+                        if sig.market_id.contains("_1d_") && streak.1 == 1 {
+                            tracing::info!(market=%sig.market_id, streak=streak.1, min_streak, "1d BLOCKED: streak");
+                        }
                         continue;
                     }
 
                     // Displacement gate: require meaningful move.
-                    // Convergence doesn't need displacement — the accumulated
-                    // position near expiry IS the signal.
-                    if sig.displacement_pct.abs() < self.min_displacement_pct {
+                    // Only applies to UpDown — strike markets have inherent
+                    // displacement from the strike distance itself.
+                    if is_updown
+                        && sig.displacement_pct.abs() < self.min_displacement_pct
+                    {
                         continue;
                     }
 
                     // Displacement direction must match signal direction.
-                    // If price is above open (UP), only allow YES bets.
-                    // If price is below open (DOWN), only allow NO bets.
-                    // Prevents betting against the scoreboard when stale drift
-                    // overwhelms the actual displacement.
-                    let price_above_open = sig.displacement_pct > 0.0;
-                    if price_above_open && !signal_yes {
-                        continue;
+                    // Only for UpDown markets where displacement IS the scoreboard.
+                    // For Above/Below markets the relationship is different —
+                    // the strike distance determines direction, not displacement.
+                    if is_updown {
+                        let price_above_open = sig.displacement_pct > 0.0;
+                        if price_above_open && !signal_yes {
+                            continue;
+                        }
+                        if !price_above_open && signal_yes {
+                            continue;
+                        }
                     }
-                    if !price_above_open && signal_yes {
-                        continue;
+
+                    // Variance ratio filter (UpDown only):
+                    // Data: VR < 1.0 → 75% win rate, VR >= 1.5 → 17%.
+                    // For NO trades: only in moderate range (0.85 – 1.5).
+                    // For YES trades: only below 1.5.
+                    // Strike markets exempt — different VR dynamics.
+                    if is_updown {
+                        if let Some(vr) = sig.variance_ratio {
+                            if !signal_yes && (vr < self.vr_block_threshold || vr > 1.5)
+                            {
+                                continue;
+                            }
+                            if signal_yes && vr > 1.5 {
+                                continue;
+                            }
+                        }
                     }
+
+                    // Note: confidence gate removed — it's mathematically
+                    // redundant with p_hat thresholds (confidence = |p_hat-0.5|*2).
+                    // The "low confidence wins" finding was actually "moderate p_hat
+                    // wins" — now captured by p_hat 0.15-0.30 for NO and ≥0.80 for YES.
 
                     // Determine trade direction for directional OFI/cross-asset
                     let signal_says_up = sig.p_hat > 0.5;
@@ -425,11 +535,24 @@ impl DecisionActor {
 
                     // Log regime + large trades
                     if sig.large_trade {
-                        tracing::info!(
+                        tracing::debug!(
                             market = %sig.market_id,
                             ofi = format_args!("{:.2}", sig.ofi_10s),
                             vol_ratio = format_args!("{:.1}", sig.vol_ratio),
                             "large trade detected on underlying"
+                        );
+                    }
+
+                    if sig.market_id.contains("_1d_") {
+                        tracing::info!(
+                            market = %sig.market_id,
+                            p_hat = format_args!("{:.3}", sig.p_hat),
+                            mid = format_args!("{:.3}", ms.midpoint),
+                            bid = format_args!("{:.3}", ms.best_bid),
+                            ask = format_args!("{:.3}", ms.best_ask),
+                            max_fill = format_args!("{:.2}", max_fill_price),
+                            is_updown = is_updown,
+                            "1d PASSED ALL FILTERS → decide()"
                         );
                     }
 
@@ -457,17 +580,12 @@ impl DecisionActor {
                     let output = match &result {
                         Ok(td) => {
                             self.pending.insert(td.market_id.clone());
-                            let regime = "STD";
                             tracing::info!(
-                                market = %td.market_id,
-                                regime,
                                 side = %td.side,
-                                p_hat = format_args!("{:.3}", sig.p_hat),
                                 fill = format_args!("{:.3}", td.price),
                                 edge = format_args!("{:.3}", td.edge),
-                                elapsed = format_args!("{:.0}%", sig.elapsed_pct * 100.0),
-                                displacement = format_args!("{:.3}%", sig.displacement_pct),
-                                "TRADE decision"
+                                usd = format_args!("${:.2}", td.size_usd),
+                                "TRADE"
                             );
                             DecisionOutput::Trade(td.clone())
                         }

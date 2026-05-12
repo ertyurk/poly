@@ -65,11 +65,11 @@ impl IngestActor {
                 break;
             }
 
-            tracing::info!(url = %url, "connecting to Binance WebSocket");
+            tracing::debug!(url = %url, "connecting to Binance WebSocket");
             match connect_async(&url).await {
                 Ok((ws_stream, _)) => {
                     retry_count = 0;
-                    tracing::info!("connected to Binance");
+                    tracing::debug!("connected to Binance");
                     let (_, mut read) = ws_stream.split();
 
                     loop {
@@ -95,7 +95,7 @@ impl IngestActor {
                                 }
                             }
                             _ = shutdown.changed() => {
-                                tracing::info!("ingest actor shutting down");
+                                tracing::debug!("ingest actor shutting down");
                                 return;
                             }
                         }

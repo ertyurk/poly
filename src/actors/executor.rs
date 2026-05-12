@@ -330,11 +330,10 @@ impl Executor {
                                 if result.success && result.matched {
                                     tracing::info!(
                                         market_id = %dec.market_id,
-                                        order_id = %result.order_id,
                                         side = %dec.side,
                                         shares = format_args!("{order_shares:.2}"),
                                         price = fill_price,
-                                        "live fill (FOK matched)"
+                                        "FILL (FOK)"
                                     );
                                 } else {
                                     tracing::warn!(
@@ -388,9 +387,8 @@ impl Executor {
             shares = format_args!("{size_shares:.2}"),
             usd = format_args!("${:.2}", dec.size_usd),
             price = fill_price,
-            slippage = format_args!("{slippage:.4}"),
             mode = ?self.mode,
-            "fill"
+            "FILL"
         );
 
         let id = self.next_decision_id;
@@ -578,11 +576,10 @@ impl Executor {
                     self.next_decision_id += 1;
                     tracing::info!(
                         market_id = %dec.market_id,
-                        order_id = %result.order_id,
                         side = %dec.side,
                         shares = format_args!("{order_shares:.2}"),
                         price = fill_price,
-                        "GTD instant fill"
+                        "FILL (GTD instant)"
                     );
                     self.positions.push(OpenPosition {
                         decision_id: id,
@@ -607,7 +604,7 @@ impl Executor {
                     }))
                 } else if result.success {
                     // Resting on book — track for polling
-                    tracing::info!(
+                    tracing::debug!(
                         market_id = %dec.market_id,
                         order_id = %result.order_id,
                         side = %dec.side,
@@ -710,13 +707,12 @@ impl Executor {
                     self.next_decision_id += 1;
                     tracing::info!(
                         market_id = %order.market_id,
-                        order_id = %order.order_id,
                         side = %order.side,
                         shares = format_args!(
                             "{:.2}", order.size_shares
                         ),
                         price = order.price,
-                        "GTD order filled (maker)"
+                        "FILL (GTD maker)"
                     );
                     self.positions.push(OpenPosition {
                         decision_id: id,
@@ -786,7 +782,7 @@ impl Executor {
     ) -> Option<LiveFill> {
         let signal_age = now - order.signal_ts;
         if signal_age > max_age_micros {
-            tracing::info!(
+            tracing::debug!(
                 market_id = %order.market_id,
                 signal_age_s = signal_age / 1_000_000,
                 "signal too stale for FOK fallback"
@@ -817,7 +813,7 @@ impl Executor {
         let max_exposure = self.bankroll * self.max_total_exposure;
         let available = (max_exposure - committed).max(0.0);
         if order.decision.size_usd > available {
-            tracing::info!(
+            tracing::debug!(
                 market_id = %order.market_id,
                 cost = order.decision.size_usd,
                 available = available,
@@ -849,10 +845,10 @@ impl Executor {
                 self.next_decision_id += 1;
                 tracing::info!(
                     market_id = %order.market_id,
-                    order_id = %r.order_id,
+                    side = %order.side,
                     price = bump_price,
                     shares = format_args!("{fok_shares:.2}"),
-                    "FOK fallback filled (taker)"
+                    "FILL (FOK fallback)"
                 );
                 self.positions.push(OpenPosition {
                     decision_id: id,

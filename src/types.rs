@@ -106,6 +106,9 @@ pub enum SkipReason {
     LowConfidence,
     DirectionGuard,
     PriceOutOfRange,
+    VolRegimeQuiet,
+    VolRegimeChaos,
+    MeanReverting,
 }
 
 impl fmt::Display for SkipReason {
@@ -116,6 +119,9 @@ impl fmt::Display for SkipReason {
             Self::LowConfidence => f.write_str("LOW_CONFIDENCE"),
             Self::DirectionGuard => f.write_str("DIRECTION_GUARD"),
             Self::PriceOutOfRange => f.write_str("PRICE_OUT_OF_RANGE"),
+            Self::VolRegimeQuiet => f.write_str("VOL_REGIME_QUIET"),
+            Self::VolRegimeChaos => f.write_str("VOL_REGIME_CHAOS"),
+            Self::MeanReverting => f.write_str("MEAN_REVERTING"),
         }
     }
 }
@@ -196,6 +202,8 @@ pub struct Signal {
     pub elapsed_pct: f64,
     /// Spot displacement from open price (%). Positive = above open.
     pub displacement_pct: f64,
+    /// Variance ratio VR(q): <1.0 = mean-reverting, >1.0 = trending.
+    pub variance_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

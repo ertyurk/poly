@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS signals (
     confidence REAL NOT NULL,
     prior REAL NOT NULL,
     n_observations INTEGER NOT NULL,
-    ts INTEGER NOT NULL
+    ts INTEGER NOT NULL,
+    vol_regime REAL,
+    variance_ratio REAL
 );
 CREATE INDEX IF NOT EXISTS idx_signals_market_ts ON signals(market_id, ts);
 

@@ -435,7 +435,7 @@ async fn run_weather(
     } else if let Ok(Some(last)) = db::queries::last_bankroll(&startup_conn) {
         tracing::info!(
             bankroll = format_args!("${last:.2}"),
-            "restored bankroll from DB"
+            "restored bankroll"
         );
         last
     } else {
@@ -976,17 +976,19 @@ async fn run_crypto(
     // Ensure app directory and config exist
     paths.ensure_config()?;
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("poly=info".parse()?)
-                .add_directive("polymarket_bot=info".parse()?),
-        )
-        .init();
-
-    // Load config
+    // Load config first so we can use its log_level
     let mut config = config::Config::load(&paths.config_str())?;
+
+    // Initialize tracing with config log_level (default: "warn")
+    let level = &config.general.log_level;
+    let filter = EnvFilter::from_default_env()
+        .add_directive(format!("poly={level}").parse()?)
+        .add_directive(format!("polymarket_bot={level}").parse()?);
+    let show_target = !level.eq_ignore_ascii_case("info");
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(show_target)
+        .init();
     // Override db_path to use resolved path
     config.general.db_path = paths.db_str();
 
@@ -999,7 +1001,7 @@ async fn run_crypto(
     } else if let Ok(Some(last)) = db::queries::last_bankroll(&startup_conn) {
         tracing::info!(
             bankroll = format_args!("${last:.2}"),
-            "restored bankroll from DB"
+            "restored bankroll"
         );
         last
     } else {
@@ -1011,7 +1013,7 @@ async fn run_crypto(
     let next_decision_id = db::queries::max_decision_id(&startup_conn).unwrap_or(0) + 1;
     drop(startup_conn);
 
-    tracing::info!(
+    tracing::debug!(
         mode = mode_str,
         bankroll = format_args!("${bankroll:.2}"),
         "loaded config"
@@ -1040,8 +1042,8 @@ async fn run_crypto(
     let (spot_tx_signal, spot_rx_signal) = mpsc::channel::<SpotTick>(5_000);
     let (market_tx_signal, market_rx_signal) = mpsc::channel::<MarketState>(100);
     let (market_tx_decision, market_rx_decision) = mpsc::channel::<MarketState>(100);
-    let (signal_tx, signal_rx) = mpsc::channel::<Signal>(1_000);
-    let (decision_in_tx, decision_in_rx) = mpsc::channel::<DecisionInput>(200);
+    let (signal_tx, signal_rx) = mpsc::channel::<Signal>(10_000);
+    let (decision_in_tx, decision_in_rx) = mpsc::channel::<DecisionInput>(10_000);
     let (decision_out_tx, mut decision_out_rx) = mpsc::channel::<DecisionOutput>(100);
     let (settle_tx, mut settle_rx) = mpsc::channel::<SettleCommand>(100);
     let (market_reg_tx, mut market_reg_rx) = mpsc::channel::<MarketState>(100);
@@ -1130,8 +1132,25 @@ async fn run_crypto(
     {
         let tx = decision_in_tx.clone();
         tokio::spawn(async move {
+            tracing::info!("signal forwarder task started");
             let mut signal_rx = signal_rx;
+            let mut count_1d = 0u64;
+            let mut total = 0u64;
             while let Some(sig) = signal_rx.recv().await {
+                total += 1;
+                if total % 1000 == 0 {
+                    tracing::info!(total, "forwarder: signals forwarded");
+                }
+                if sig.market_id.contains("_1d_") {
+                    count_1d += 1;
+                    if count_1d <= 3 {
+                        tracing::info!(
+                            market = %sig.market_id,
+                            count = count_1d,
+                            "forwarder: 1d signal received from signal_rx"
+                        );
+                    }
+                }
                 if tx.send(DecisionInput::Signal(sig)).await.is_err() {
                     break;
                 }
@@ -1167,6 +1186,10 @@ async fn run_crypto(
         config.strategy.midpoint_ema_tau_secs,
         config.strategy.min_displacement_pct,
         config.strategy.max_fill_price,
+        config.strategy.kelly_fraction_no,
+        config.strategy.vol_regime_min,
+        config.strategy.vol_regime_max,
+        config.strategy.vr_block_threshold,
     );
     tokio::spawn(async move {
         decision_actor.run().await;
@@ -1219,7 +1242,7 @@ async fn run_crypto(
             tokio::spawn(async move {
                 actor.run(tg_rx, tg_shutdown).await;
             });
-            tracing::info!(
+            tracing::debug!(
                 summary_interval_mins = tg.summary_interval_mins,
                 "telegram alerts enabled"
             );
@@ -1261,7 +1284,7 @@ async fn run_crypto(
                 pos.entry_ts,
                 pos.estimated_slippage,
             );
-            tracing::info!(
+            tracing::debug!(
                 market = %pos.market_id,
                 side = %pos.side,
                 size = format_args!("${:.2}", pos.size),
@@ -1451,12 +1474,11 @@ async fn run_crypto(
                             total_pnl += tr.pnl;
 
                             tracing::info!(
-                                market = %tr.market_id,
                                 outcome = %tr.outcome,
-                                size_shares = format_args!("{:.2}", tr.size_shares),
+                                side = %tr.side,
                                 pnl = format_args!("{:+.2}", tr.pnl),
                                 bankroll = format_args!("${:.2}", tr.bankroll_after),
-                                "settled"
+                                "SETTLED"
                             );
 
                             if let Some(ref stats) = exec_tg_stats {
@@ -1558,16 +1580,12 @@ async fn run_crypto(
         )
     });
 
-    // Log startup info
     tracing::info!(
-        "poly v{} — {mode_str} mode — ${bankroll:.2} bankroll",
+        "poly v{} — {mode_str} — ${bankroll:.2}",
         env!("CARGO_PKG_VERSION"),
     );
-    tracing::info!("asset={:?} window={:?}", asset_filter, window_filter);
-    if paper_trade {
-        tracing::info!("paper-trade mode: real market data, simulated execution");
-    } else {
-        tracing::info!("REAL trading mode: orders will be placed on Polymarket");
+    if !paper_trade {
+        tracing::warn!("LIVE trading: real orders on Polymarket");
     }
     tracing::info!("press Ctrl+C to stop");
 
@@ -1601,17 +1619,9 @@ async fn run_crypto(
         tracing::info!("══════════════════════════════════════════");
         tracing::info!("         TRADING SUMMARY ({mode_str})      ");
         tracing::info!("══════════════════════════════════════════");
-        tracing::info!("  Markets resolved:   {markets_resolved}");
-        tracing::info!("  Trades placed:      {trades_placed}");
-        tracing::info!("  Fill rejections:    {fill_rejections}");
-        tracing::info!("  Signals skipped:    {trades_skipped}");
-        tracing::info!("  Wins / Losses:      {wins} / {losses}");
-        tracing::info!("  Win rate:           {win_rate:.1}%");
-        tracing::info!("  Total fees:         ${total_fees:.2}");
-        tracing::info!("  Net P&L:            {total_pnl:+.2}");
-        tracing::info!("  Starting bankroll:  ${bankroll:.2}");
-        tracing::info!("  Final bankroll:     ${final_bankroll:.2}");
-        tracing::info!("  Return:             {return_pct:+.2}%");
+        tracing::info!("  Trades:  {wins}W / {losses}L ({win_rate:.1}%)");
+        tracing::info!("  P&L:     {total_pnl:+.2}  (fees ${total_fees:.2})");
+        tracing::info!("  Bankroll: ${bankroll:.2} → ${final_bankroll:.2} ({return_pct:+.1}%)");
         tracing::info!("══════════════════════════════════════════");
     }
 

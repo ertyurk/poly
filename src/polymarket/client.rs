@@ -35,7 +35,7 @@ impl PolymarketClient {
         &self,
     ) -> Result<Vec<GammaMarket>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
-            "{}/events?tag=crypto&active=true&closed=false&limit=100&order=volume24hr&ascending=false",
+            "{}/events?active=true&closed=false&limit=100&order=volume24hr&ascending=false",
             self.gamma_url
         );
         let resp = self.http.get(&url).send().await?;
@@ -57,7 +57,7 @@ impl PolymarketClient {
                 })
                 .count();
             if new_count > 0 {
-                tracing::info!(
+                tracing::debug!(
                     count = new_count,
                     "discovered up/down markets via slug lookup"
                 );

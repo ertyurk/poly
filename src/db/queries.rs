@@ -60,8 +60,8 @@ pub fn insert_book_snapshot(
 
 pub fn insert_signal(conn: &Connection, sig: &Signal) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO signals (market_id, p_hat, confidence, prior, n_observations, ts)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO signals (market_id, p_hat, confidence, prior, n_observations, ts, vol_regime, variance_ratio)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             sig.market_id,
             sig.p_hat,
@@ -69,6 +69,8 @@ pub fn insert_signal(conn: &Connection, sig: &Signal) -> Result<(), rusqlite::Er
             sig.prior,
             sig.n_observations,
             sig.ts,
+            sig.vol_regime,
+            sig.variance_ratio,
         ],
     )?;
     Ok(())
